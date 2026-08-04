@@ -1,29 +1,84 @@
-import express from 'express';
+import express from "express";
 
 import {
-  getCustomers,
-  getCustomerById,
   createCustomer,
-  updateCustomer,
   deleteCustomer,
-  depositCustomerBalance,
-  getCustomerTransactions
-} from '../controllers/customer.controller.js';
+  getCustomerById,
+  getCustomers,
+  getMyCustomerProfile,
+  updateCustomer,
+  updateCustomerBalance,
+  updateCustomerStatus,
+} from "../controllers/customer.controller.js";
 
-import { protect } from '../middleware/auth.middleware.js';
+import {
+  authorizeRoles,
+  protect,
+} from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
 router.use(protect);
 
-router.get('/', getCustomers);
-router.post('/', createCustomer);
+/* Keep /me before /:id. */
+router.get(
+  "/me",
+  authorizeRoles("customer"),
+  getMyCustomerProfile,
+);
 
-router.post('/:id/deposit', depositCustomerBalance);
-router.get('/:id/transactions', getCustomerTransactions);
+router
+  .route("/")
+  .get(authorizeRoles("admin"), getCustomers)
+  .post(authorizeRoles("admin"), createCustomer);
 
-router.get('/:id', getCustomerById);
-router.put('/:id', updateCustomer);
-router.delete('/:id', deleteCustomer);
+router.patch(
+  "/:id/balance",
+  authorizeRoles("admin"),
+  updateCustomerBalance,
+);
+
+router.patch(
+  "/:id/balance/set",
+  authorizeRoles("admin"),
+  (req, _res, next) => {
+    req.body.operation = "set";
+    next();
+  },
+  updateCustomerBalance,
+);
+
+router.patch(
+  "/:id/balance/deposit",
+  authorizeRoles("admin"),
+  (req, _res, next) => {
+    req.body.operation = "deposit";
+    next();
+  },
+  updateCustomerBalance,
+);
+
+router.patch(
+  "/:id/balance/withdraw",
+  authorizeRoles("admin"),
+  (req, _res, next) => {
+    req.body.operation = "withdraw";
+    next();
+  },
+  updateCustomerBalance,
+);
+
+router.patch(
+  "/:id/status",
+  authorizeRoles("admin"),
+  updateCustomerStatus,
+);
+
+router
+  .route("/:id")
+  .get(authorizeRoles("admin"), getCustomerById)
+  .put(authorizeRoles("admin"), updateCustomer)
+  .patch(authorizeRoles("admin"), updateCustomer)
+  .delete(authorizeRoles("admin"), deleteCustomer);
 
 export default router;

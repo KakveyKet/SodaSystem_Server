@@ -19,7 +19,11 @@ router.get('/', getLotteryPlays);
 router.post('/', createLotteryPlay);
 router.get('/:id', getLotteryPlayById);
 router.put('/:id', updateLotteryPlay);
-router.patch('/:id/checked-status', updateLotteryPlayCheckedStatus);
+router.patch(
+  '/:id/checked-status',
+  protect,
+  updateLotteryPlayCheckedStatus
+);
 router.delete('/:id', deleteLotteryPlay);
 
 export default router;

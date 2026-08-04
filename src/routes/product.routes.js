@@ -1,22 +1,46 @@
-import express from 'express';
+import express from "express";
+
 import {
   getProducts,
   getProductById,
   createProduct,
   updateProduct,
-  deleteProduct
-} from '../controllers/product.controller.js';
-
-import { protect } from '../middleware/auth.middleware.js';
+  updateProductStatus,
+  deleteProduct,
+} from "../controllers/product.controller.js";
 
 const router = express.Router();
 
-router.use(protect);
+/*
+|--------------------------------------------------------------------------
+| Collection routes
+|--------------------------------------------------------------------------
+*/
 
-router.get('/', getProducts);
-router.get('/:id', getProductById);
-router.post('/', createProduct);
-router.put('/:id', updateProduct);
-router.delete('/:id', deleteProduct);
+router.route("/").get(getProducts).post(createProduct);
+
+/*
+|--------------------------------------------------------------------------
+| Status route
+|--------------------------------------------------------------------------
+|
+| Keep this route before /:id.
+|
+*/
+
+router.patch("/:id/status", updateProductStatus);
+
+/*
+|--------------------------------------------------------------------------
+| Product routes
+|--------------------------------------------------------------------------
+*/
+
+router
+  .route("/:id")
+  .get(getProductById)
+  .put(updateProduct)
+  .patch(updateProduct)
+  .delete(deleteProduct);
 
 export default router;

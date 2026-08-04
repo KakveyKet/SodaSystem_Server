@@ -1,244 +1,587 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
-const getRatePercent = (value) => {
-  const rate = Number(value || 0);
-  return rate > 0 ? rate : 100;
+const { Schema } = mongoose;
+
+/*
+|--------------------------------------------------------------------------
+| Validation helpers
+|--------------------------------------------------------------------------
+*/
+
+const isFiniteNonNegativeNumber = (value) => {
+  return Number.isFinite(Number(value)) && Number(value) >= 0;
 };
 
-const calculateAmountWithRate = (amount, rate) => {
-  return (Number(amount || 0) * getRatePercent(rate)) / 100;
+const uniqueObjectIds = (values = []) => {
+  const uniqueMap = new Map();
+
+  values.filter(Boolean).forEach((value) => {
+    uniqueMap.set(String(value), value);
+  });
+
+  return Array.from(uniqueMap.values());
 };
 
-const toPlayResultNumber = (value) => {
-  return Math.trunc(Math.abs(Number(value || 0)));
-};
+/*
+|--------------------------------------------------------------------------
+| Lottery play row schema
+|--------------------------------------------------------------------------
+|
+| 2D and 3D numbers have no maximum limit.
+|
+| Valid:
+|   100
+|   1000
+|   999999
+|   50000000
+|
+| Invalid:
+|   negative numbers
+|   Infinity
+|   NaN
+|
+*/
 
-const TWO_DIGIT_WIN_MULTIPLIER = 100;
-const THREE_DIGIT_WIN_MULTIPLIER = 600;
-
-const lotteryPlayRowSchema = new mongoose.Schema(
+const lotteryPlayRowSchema = new Schema(
   {
     rowTitle: {
       type: String,
-      required: [true, 'Row title is required'],
-      trim: true
+
+      required: [true, "Row title is required"],
+
+      trim: true,
+
+      maxlength: [250, "Row title cannot exceed 250 characters"],
     },
+
+    /*
+      |--------------------------------------------------------------------------
+      | 2D fields
+      |--------------------------------------------------------------------------
+      */
 
     twoDigitNumber: {
       type: Number,
+
       default: null,
-      min: [0, 'Two digit number cannot be negative'],
-      max: [99, 'Two digit number cannot be greater than 99']
-    },
 
-    threeDigitNumber: {
-      type: Number,
-      default: null,
-      min: [0, 'Three digit number cannot be negative'],
-      max: [999, 'Three digit number cannot be greater than 999']
-    },
+      validate: {
+        validator(value) {
+          if (!this.isTwoNumber) {
+            return (
+              value === null ||
+              value === undefined ||
+              isFiniteNonNegativeNumber(value)
+            );
+          }
 
-    winTwoNumberType: {
-      type: Number,
-      default: 0,
-      min: [0, '2D type cannot be negative']
-    },
+          return (
+            value !== null &&
+            value !== undefined &&
+            isFiniteNonNegativeNumber(value)
+          );
+        },
 
-    winThreeNumberType: {
-      type: Number,
-      default: 0,
-      min: [0, '3D type cannot be negative']
+        message: "2D number must be a valid non-negative number",
+      },
     },
 
     twoDigitAmount: {
       type: Number,
+
       default: 0,
-      min: [0, 'Two digit amount cannot be negative']
+
+      validate: {
+        validator(value) {
+          return isFiniteNonNegativeNumber(value);
+        },
+
+        message: "2D amount must be a valid non-negative number",
+      },
     },
 
-    threeDigitAmount: {
+    winTwoNumberType: {
       type: Number,
+
       default: 0,
-      min: [0, 'Three digit amount cannot be negative']
+
+      validate: {
+        validator(value) {
+          return isFiniteNonNegativeNumber(value);
+        },
+
+        message: "Correct 2D value must be a valid non-negative number",
+      },
     },
 
     isTwoNumber: {
       type: Boolean,
-      default: false
+      default: false,
+    },
+
+    /*
+      |--------------------------------------------------------------------------
+      | 3D fields
+      |--------------------------------------------------------------------------
+      */
+
+    threeDigitNumber: {
+      type: Number,
+
+      default: null,
+
+      validate: {
+        validator(value) {
+          if (!this.isThreeNumber) {
+            return (
+              value === null ||
+              value === undefined ||
+              isFiniteNonNegativeNumber(value)
+            );
+          }
+
+          return (
+            value !== null &&
+            value !== undefined &&
+            isFiniteNonNegativeNumber(value)
+          );
+        },
+
+        message: "3D number must be a valid non-negative number",
+      },
+    },
+
+    threeDigitAmount: {
+      type: Number,
+
+      default: 0,
+
+      validate: {
+        validator(value) {
+          return isFiniteNonNegativeNumber(value);
+        },
+
+        message: "3D amount must be a valid non-negative number",
+      },
+    },
+
+    winThreeNumberType: {
+      type: Number,
+
+      default: 0,
+
+      validate: {
+        validator(value) {
+          return isFiniteNonNegativeNumber(value);
+        },
+
+        message: "Correct 3D value must be a valid non-negative number",
+      },
     },
 
     isThreeNumber: {
       type: Boolean,
-      default: false
-    },
-
-    totalAmount: {
-      type: Number,
-      default: 0
+      default: false,
     },
 
     checkedStatus: {
       type: Boolean,
-      default: false
-    }
+      default: false,
+    },
   },
   {
-    _id: true
-  }
+    _id: true,
+
+    timestamps: false,
+  },
 );
 
-const lotteryPlaySchema = new mongoose.Schema(
+/*
+|--------------------------------------------------------------------------
+| Normalize disabled row fields
+|--------------------------------------------------------------------------
+*/
+
+lotteryPlayRowSchema.pre("validate", function normalizeRowBeforeValidation() {
+  if (!this.isTwoNumber) {
+    this.twoDigitNumber = null;
+    this.twoDigitAmount = 0;
+    this.winTwoNumberType = 0;
+  }
+
+  if (!this.isThreeNumber) {
+    this.threeDigitNumber = null;
+    this.threeDigitAmount = 0;
+    this.winThreeNumberType = 0;
+  }
+});
+
+/*
+|--------------------------------------------------------------------------
+| Main lottery play schema
+|--------------------------------------------------------------------------
+*/
+
+const lotteryPlaySchema = new Schema(
   {
-    categoryId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Category',
-      required: [true, 'Category ID is required']
+    title: {
+      type: String,
+
+      required: [true, "Invoice name is required"],
+
+      trim: true,
+
+      maxlength: [250, "Invoice name cannot exceed 250 characters"],
+
+      index: true,
     },
 
-    productId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Product',
-      required: [true, 'Product ID is required']
+    /*
+      |--------------------------------------------------------------------------
+      | Multiple categories
+      |--------------------------------------------------------------------------
+      */
+
+    categoryIds: {
+      type: [
+        {
+          type: Schema.Types.ObjectId,
+
+          ref: "Category",
+        },
+      ],
+
+      default: [],
+
+      validate: {
+        validator(values) {
+          return Array.isArray(values) && values.length > 0;
+        },
+
+        message: "At least one category is required",
+      },
     },
+
+    /*
+     * Legacy single-category field.
+     *
+     * Keep this temporarily so older invoice
+     * documents continue working.
+     */
+    categoryId: {
+      type: Schema.Types.ObjectId,
+
+      ref: "Category",
+
+      default: null,
+    },
+
+    /*
+      |--------------------------------------------------------------------------
+      | Multiple products
+      |--------------------------------------------------------------------------
+      */
+
+    productIds: {
+      type: [
+        {
+          type: Schema.Types.ObjectId,
+
+          ref: "Product",
+        },
+      ],
+
+      default: [],
+
+      validate: {
+        validator(values) {
+          return Array.isArray(values) && values.length > 0;
+        },
+
+        message: "At least one product is required",
+      },
+    },
+
+    /*
+     * Legacy single-product field.
+     *
+     * Keep this temporarily so older invoice
+     * documents continue working.
+     */
+    productId: {
+      type: Schema.Types.ObjectId,
+
+      ref: "Product",
+
+      default: null,
+    },
+
+    /*
+      |--------------------------------------------------------------------------
+      | Customer
+      |--------------------------------------------------------------------------
+      */
 
     customerId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Customer',
-      required: [true, 'Customer ID is required']
+      type: Schema.Types.ObjectId,
+
+      ref: "Customer",
+
+      required: [true, "Customer is required"],
+
+      index: true,
     },
+
+    /*
+      |--------------------------------------------------------------------------
+      | Invoice date
+      |--------------------------------------------------------------------------
+      */
 
     playDate: {
       type: Date,
-      required: [true, 'Play date is required'],
-      default: Date.now
+
+      required: [true, "Invoice date is required"],
+
+      index: true,
     },
 
-    title: {
-      type: String,
-      required: [true, 'Play name is required'],
-      trim: true
-    },
+    /*
+      |--------------------------------------------------------------------------
+      | Rates
+      |--------------------------------------------------------------------------
+      */
 
     twoDigitRate: {
       type: Number,
-      default: 100
+
+      required: [true, "2D rate is required"],
+
+      validate: {
+        validator(value) {
+          return Number.isFinite(Number(value)) && Number(value) > 0;
+        },
+
+        message: "2D rate must be greater than zero",
+      },
     },
 
     threeDigitRate: {
       type: Number,
-      default: 100
+
+      required: [true, "3D rate is required"],
+
+      validate: {
+        validator(value) {
+          return Number.isFinite(Number(value)) && Number(value) > 0;
+        },
+
+        message: "3D rate must be greater than zero",
+      },
     },
+
+    /*
+      |--------------------------------------------------------------------------
+      | Invoice rows
+      |--------------------------------------------------------------------------
+      */
 
     rows: {
       type: [lotteryPlayRowSchema],
-      default: [],
+
+      required: [true, "At least one play row is required"],
+
       validate: {
-        validator(value) {
-          return Array.isArray(value) && value.length > 0;
+        validator(values) {
+          return Array.isArray(values) && values.length > 0;
         },
-        message: 'At least one play row is required'
-      }
+
+        message: "At least one play row is required",
+      },
     },
+
+    /*
+      |--------------------------------------------------------------------------
+      | Calculated amount
+      |--------------------------------------------------------------------------
+      |
+      | This stores the sum of:
+      |
+      | - twoDigitAmount
+      | - threeDigitAmount
+      |
+      | for enabled rows.
+      |
+      */
 
     totalAmount: {
       type: Number,
-      default: 0
+
+      default: 0,
+
+      validate: {
+        validator(value) {
+          return Number.isFinite(Number(value)) && Number(value) >= 0;
+        },
+
+        message: "Total amount cannot be negative",
+      },
     },
 
     checkedStatus: {
       type: Boolean,
-      default: false
+      default: false,
+      index: true,
     },
 
     status: {
       type: Boolean,
-      default: true
+      default: true,
+      index: true,
     },
 
     createdBy: {
       type: String,
-      default: 'System'
+
+      trim: true,
+
+      default: "System",
     },
 
     updatedBy: {
       type: String,
-      default: 'System'
-    }
+
+      trim: true,
+
+      default: "System",
+    },
   },
   {
     timestamps: true,
+
+    versionKey: false,
+
     toJSON: {
       virtuals: true,
-      versionKey: false,
-      transform(doc, ret) {
-        ret.id = ret._id.toString();
-        delete ret._id;
-        return ret;
-      }
-    }
-  }
+    },
+
+    toObject: {
+      virtuals: true,
+    },
+  },
 );
 
-lotteryPlaySchema.pre('validate', function () {
-  let twoDigitBaseTotal = 0;
-  let threeDigitBaseTotal = 0;
-  let twoDigitCorrectTotal = 0;
-  let threeDigitCorrectTotal = 0;
+/*
+|--------------------------------------------------------------------------
+| Normalize references and totals
+|--------------------------------------------------------------------------
+*/
 
-  this.rows.forEach((row) => {
-    const twoDigitNumber = row.isTwoNumber ? Number(row.twoDigitNumber || 0) : 0;
+lotteryPlaySchema.pre(
+  "validate",
+  function normalizeLotteryPlayBeforeValidation() {
+    /*
+     * Convert old categoryId into categoryIds.
+     */
+    if (
+      (!Array.isArray(this.categoryIds) || this.categoryIds.length === 0) &&
+      this.categoryId
+    ) {
+      this.categoryIds = [this.categoryId];
+    }
 
-    const threeDigitNumber = row.isThreeNumber
-      ? Number(row.threeDigitNumber || 0)
+    /*
+     * Remove duplicate categories.
+     */
+    this.categoryIds = uniqueObjectIds(this.categoryIds);
+
+    /*
+     * Keep the legacy categoryId synchronized
+     * with the first selected category.
+     */
+    if (this.categoryIds.length > 0) {
+      this.categoryId = this.categoryIds[0];
+    }
+
+    /*
+     * Convert old productId into productIds.
+     */
+    if (
+      (!Array.isArray(this.productIds) || this.productIds.length === 0) &&
+      this.productId
+    ) {
+      this.productIds = [this.productId];
+    }
+
+    /*
+     * Remove duplicate products.
+     */
+    this.productIds = uniqueObjectIds(this.productIds);
+
+    /*
+     * Keep the legacy productId synchronized
+     * with the first selected product.
+     */
+    if (this.productIds.length > 0) {
+      this.productId = this.productIds[0];
+    }
+
+    /*
+     * Recalculate totalAmount.
+     */
+    this.totalAmount = Array.isArray(this.rows)
+      ? this.rows.reduce((total, row) => {
+          const twoDigitAmount = row.isTwoNumber
+            ? Number(row.twoDigitAmount || 0)
+            : 0;
+
+          const threeDigitAmount = row.isThreeNumber
+            ? Number(row.threeDigitAmount || 0)
+            : 0;
+
+          return total + twoDigitAmount + threeDigitAmount;
+        }, 0)
       : 0;
+  },
+);
 
-    const twoDigitCorrect = row.isTwoNumber
-      ? Number(row.winTwoNumberType || 0)
-      : 0;
+/*
+|--------------------------------------------------------------------------
+| Indexes
+|--------------------------------------------------------------------------
+*/
 
-    const threeDigitCorrect = row.isThreeNumber
-      ? Number(row.winThreeNumberType || 0)
-      : 0;
-
-    row.totalAmount = twoDigitNumber + threeDigitNumber;
-    row.winTwoNumberType = twoDigitCorrect;
-    row.winThreeNumberType = threeDigitCorrect;
-
-    twoDigitBaseTotal += twoDigitNumber;
-    threeDigitBaseTotal += threeDigitNumber;
-    twoDigitCorrectTotal += twoDigitCorrect;
-    threeDigitCorrectTotal += threeDigitCorrect;
-  });
-
-  const twoDigitGrandTotal = calculateAmountWithRate(
-    twoDigitBaseTotal,
-    this.twoDigitRate
-  );
-
-  const threeDigitGrandTotal = calculateAmountWithRate(
-    threeDigitBaseTotal,
-    this.threeDigitRate
-  );
-
-  const twoDigitResult = toPlayResultNumber(twoDigitGrandTotal);
-  const threeDigitResult = toPlayResultNumber(threeDigitGrandTotal);
-
-  const twoDigitCorrectDeduction =
-    twoDigitCorrectTotal * TWO_DIGIT_WIN_MULTIPLIER;
-
-  const threeDigitCorrectDeduction =
-    threeDigitCorrectTotal * THREE_DIGIT_WIN_MULTIPLIER;
-
-  const playResultTotal = twoDigitResult + threeDigitResult;
-
-  const correctDeductionTotal =
-    twoDigitCorrectDeduction + threeDigitCorrectDeduction;
-
-  this.totalAmount = playResultTotal - correctDeductionTotal;
-  this.checkedStatus = false;
+lotteryPlaySchema.index({
+  playDate: -1,
+  createdAt: -1,
 });
 
+lotteryPlaySchema.index({
+  categoryIds: 1,
+});
+
+lotteryPlaySchema.index({
+  productIds: 1,
+});
+
+lotteryPlaySchema.index({
+  customerId: 1,
+  playDate: -1,
+});
+
+lotteryPlaySchema.index({
+  status: 1,
+  checkedStatus: 1,
+});
+
+/*
+|--------------------------------------------------------------------------
+| Model export
+|--------------------------------------------------------------------------
+*/
+
 const LotteryPlay =
-  mongoose.models.LotteryPlay || mongoose.model('LotteryPlay', lotteryPlaySchema);
+  mongoose.models.LotteryPlay ||
+  mongoose.model("LotteryPlay", lotteryPlaySchema);
 
 export default LotteryPlay;

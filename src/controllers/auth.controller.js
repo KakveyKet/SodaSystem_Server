@@ -1,211 +1,332 @@
-import bcrypt from 'bcryptjs';
-import User from '../models/User.js';
-import generateToken from '../utils/generateToken.js';
+import jwt from "jsonwebtoken";
 
-const cookieOptions = {
-  httpOnly: true,
-  sameSite: 'strict',
-  secure: process.env.NODE_ENV === 'production',
-  maxAge: 7 * 24 * 60 * 60 * 1000
+import Customer from "../models/Customer.js";
+import User, { USER_ROLES } from "../models/User.js";
+
+const createHttpError = (message, statusCode = 400) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
 };
 
-const SUPER_ADMIN = {
-  name: process.env.SUPER_ADMIN_NAME || 'Super Admin',
-  email: (process.env.SUPER_ADMIN_EMAIL || 'admin@example.com').toLowerCase().trim(),
-  password: process.env.SUPER_ADMIN_PASSWORD || 'Admin@12345',
-  role: 'admin'
-};
+const sendError = (error, res, fallbackMessage) => {
+  console.error(`${fallbackMessage}:`, error);
 
-const normalizeEmail = (email = '') => {
-  return email.toLowerCase().trim();
-};
-
-const formatUser = (user, extra = {}) => {
-  return {
-    id: user._id,
-    name: user.name,
-    email: user.email,
-    role: user.role || 'user',
-    ...extra
-  };
-};
-
-const createToken = (userId) => {
-  if (!process.env.JWT_SECRET) {
-    throw new Error('JWT_SECRET is missing in .env file');
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      success: false,
+      message: error.message,
+    });
   }
 
-  return generateToken(userId);
-};
+  if (error.name === "ValidationError") {
+    return res.status(400).json({
+      success: false,
+      message:
+        Object.values(error.errors || {})[0]?.message ||
+        "Account validation failed",
+    });
+  }
 
-const sendAuthResponse = (res, statusCode, token, user) => {
-  res.cookie('token', token, cookieOptions);
+  if (error.code === 11000) {
+    const field = Object.keys(error.keyPattern || error.keyValue || {})[0];
 
-  return res.status(statusCode).json({
-    token,
-    user
+    return res.status(409).json({
+      success: false,
+      message:
+        field === "email"
+          ? "Email is already being used"
+          : "Username is already being used",
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: fallbackMessage,
   });
 };
 
-const isSuperAdminLogin = (email, password) => {
-  return normalizeEmail(email) === SUPER_ADMIN.email && password === SUPER_ADMIN.password;
+const normalizeUsername = (value) => {
+  const username = String(value ?? "").trim().toLowerCase();
+
+  if (!username) {
+    throw createHttpError("Username is required", 400);
+  }
+
+  return username;
 };
 
-const compareUserPassword = async (user, plainPassword) => {
-  if (!user.password) {
-    throw new Error('Password field is missing. Make sure User model has password field and .select("+password") works.');
+const normalizeEmail = (value) => {
+  const email = String(value ?? "").trim().toLowerCase();
+
+  if (!email) {
+    return "";
   }
 
-  if (typeof user.comparePassword === 'function') {
-    return await user.comparePassword(plainPassword);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw createHttpError("Please provide a valid email address", 400);
   }
 
-  return await bcrypt.compare(plainPassword, user.password);
+  return email;
 };
 
-const getOrCreateSuperAdmin = async () => {
-  let superAdmin = await User.findOne({
-    email: SUPER_ADMIN.email
-  }).select('+password');
+const normalizePassword = (value) => {
+  const password = String(value ?? "");
 
-  if (!superAdmin) {
-    superAdmin = await User.create({
-      name: SUPER_ADMIN.name,
-      email: SUPER_ADMIN.email,
-      password: SUPER_ADMIN.password,
-      role: SUPER_ADMIN.role
-    });
-
-    console.log('✅ Super Admin created in MongoDB:', SUPER_ADMIN.email);
-
-    return superAdmin;
+  if (!password) {
+    throw createHttpError("Password is required", 400);
   }
 
-  let shouldSave = false;
-
-  if (superAdmin.name !== SUPER_ADMIN.name) {
-    superAdmin.name = SUPER_ADMIN.name;
-    shouldSave = true;
+  if (password.length < 6) {
+    throw createHttpError(
+      "Password must contain at least 6 characters",
+      400,
+    );
   }
 
-  if (superAdmin.role !== SUPER_ADMIN.role) {
-    superAdmin.role = SUPER_ADMIN.role;
-    shouldSave = true;
-  }
-
-  const passwordIsCorrect = await compareUserPassword(superAdmin, SUPER_ADMIN.password);
-
-  if (!passwordIsCorrect) {
-    superAdmin.password = SUPER_ADMIN.password;
-    shouldSave = true;
-  }
-
-  if (shouldSave) {
-    await superAdmin.save();
-    console.log('✅ Super Admin updated in MongoDB:', SUPER_ADMIN.email);
-  }
-
-  return superAdmin;
+  return password;
 };
 
-export const register = async (req, res, next) => {
+const normalizeStatus = (value, fallback = true) => {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  if ([true, "true", 1, "1"].includes(value)) {
+    return true;
+  }
+
+  if ([false, "false", 0, "0"].includes(value)) {
+    return false;
+  }
+
+  throw createHttpError("Status must be true or false", 400);
+};
+
+const signToken = (user) => {
+  if (!process.env.JWT_SECRET) {
+    throw createHttpError("JWT_SECRET is not configured", 500);
+  }
+
+  return jwt.sign(
+    {
+      userId: user._id.toString(),
+      role: user.role,
+    },
+    process.env.JWT_SECRET,
+    {
+      expiresIn: process.env.JWT_EXPIRES_IN || "7d",
+    },
+  );
+};
+
+const sanitizeUser = (user) => ({
+  id: user._id.toString(),
+  name: user.name || "",
+  username: user.username,
+  email: user.email || null,
+  role: user.role,
+  status: user.status !== false,
+  lastLoginAt: user.lastLoginAt || null,
+  createdAt: user.createdAt,
+  updatedAt: user.updatedAt,
+});
+
+const ensureIdentityAvailable = async (username, email) => {
+  const conditions = [{ username }];
+
+  if (email) {
+    conditions.push({ email });
+  }
+
+  const existing = await User.findOne({ $or: conditions }).lean();
+
+  if (existing) {
+    throw createHttpError(
+      "Username or email is already being used",
+      409,
+    );
+  }
+};
+
+const login = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-    const normalizedEmail = normalizeEmail(email);
+    const identifier = String(
+      req.body.identifier || req.body.username || req.body.email || "",
+    )
+      .trim()
+      .toLowerCase();
 
-    if (!name || !normalizedEmail || !password) {
-      return res.status(400).json({
-        message: 'Name, email and password are required'
-      });
+    const password = String(req.body.password || "");
+
+    if (!identifier) {
+      throw createHttpError("Username or email is required", 400);
     }
 
-    if (normalizedEmail === SUPER_ADMIN.email) {
-      return res.status(403).json({
-        message: 'This email is reserved for Super Admin'
-      });
-    }
-
-    const existingUser = await User.findOne({
-      email: normalizedEmail
-    });
-
-    if (existingUser) {
-      return res.status(400).json({
-        message: 'Email already registered'
-      });
-    }
-
-    const user = await User.create({
-      name,
-      email: normalizedEmail,
-      password
-    });
-
-    const token = createToken(user._id);
-
-    return sendAuthResponse(res, 201, token, formatUser(user));
-  } catch (error) {
-    console.error('REGISTER ERROR:', error);
-    next(error);
-  }
-};
-
-export const login = async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
-    const normalizedEmail = normalizeEmail(email);
-
-    if (!normalizedEmail || !password) {
-      return res.status(400).json({
-        message: 'Email and password are required'
-      });
-    }
-
-    if (isSuperAdminLogin(normalizedEmail, password)) {
-      const superAdmin = await getOrCreateSuperAdmin();
-      const token = createToken(superAdmin._id);
-
-      return sendAuthResponse(
-        res,
-        200,
-        token,
-        formatUser(superAdmin, {
-          isSuperAdmin: true
-        })
-      );
+    if (!password) {
+      throw createHttpError("Password is required", 400);
     }
 
     const user = await User.findOne({
-      email: normalizedEmail
-    }).select('+password');
+      $or: [{ username: identifier }, { email: identifier }],
+    }).select("+password");
 
     if (!user) {
-      return res.status(401).json({
-        message: 'Invalid email or password'
-      });
+      throw createHttpError("Invalid username, email, or password", 401);
     }
 
-    const passwordIsCorrect = await compareUserPassword(user, password);
+    const passwordMatches = await user.comparePassword(password);
 
-    if (!passwordIsCorrect) {
-      return res.status(401).json({
-        message: 'Invalid email or password'
-      });
+    if (!passwordMatches) {
+      throw createHttpError("Invalid username, email, or password", 401);
     }
 
-    const token = createToken(user._id);
+    if (user.status === false) {
+      throw createHttpError("Your account is inactive", 403);
+    }
 
-    return sendAuthResponse(res, 200, token, formatUser(user));
+    let customer = null;
+
+    if (user.role === "customer") {
+      customer = await Customer.findOne({ userId: user._id }).lean();
+
+      if (!customer) {
+        throw createHttpError(
+          "Customer profile is not linked to this login account",
+          403,
+        );
+      }
+
+      if (customer.status === false) {
+        throw createHttpError("Your customer account is inactive", 403);
+      }
+    }
+
+    user.lastLoginAt = new Date();
+    await user.save();
+
+    const token = signToken(user);
+
+    return res.status(200).json({
+      success: true,
+      message: "Login successful",
+      token,
+      data: {
+        token,
+        user: sanitizeUser(user),
+        customer,
+      },
+    });
   } catch (error) {
-    console.error('LOGIN ERROR:', error);
-    next(error);
+    return sendError(error, res, "Could not log in");
   }
 };
 
-export const logout = (req, res) => {
-  res.clearCookie('token');
+const registerUser = async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body.username);
+    const email = normalizeEmail(req.body.email);
+    const password = normalizePassword(req.body.password);
 
-  return res.json({
-    message: 'Logged out successfully'
-  });
+    await ensureIdentityAvailable(username, email);
+
+    const user = await User.create({
+      name: String(req.body.name || "").trim(),
+      username,
+      email: email || undefined,
+      password,
+      role: "user",
+      status: true,
+    });
+
+    const token = signToken(user);
+
+    return res.status(201).json({
+      success: true,
+      message: "Account created successfully",
+      token,
+      data: {
+        token,
+        user: sanitizeUser(user),
+      },
+    });
+  } catch (error) {
+    return sendError(error, res, "Could not create account");
+  }
+};
+
+const registerAccountByAdmin = async (req, res) => {
+  try {
+    const username = normalizeUsername(req.body.username);
+    const email = normalizeEmail(req.body.email);
+    const password = normalizePassword(req.body.password);
+    const role = String(req.body.role || "user").trim().toLowerCase();
+    const status = normalizeStatus(req.body.status, true);
+
+    if (!USER_ROLES.includes(role)) {
+      throw createHttpError("Role must be admin, user, or customer", 400);
+    }
+
+    if (role === "customer") {
+      throw createHttpError(
+        "Create customer accounts from the Customer page",
+        400,
+      );
+    }
+
+    await ensureIdentityAvailable(username, email);
+
+    const user = await User.create({
+      name: String(req.body.name || "").trim(),
+      username,
+      email: email || undefined,
+      password,
+      role,
+      status,
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Account created successfully",
+      data: { user: sanitizeUser(user) },
+    });
+  } catch (error) {
+    return sendError(error, res, "Could not create account");
+  }
+};
+
+const getMe = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      throw createHttpError("Account not found", 404);
+    }
+
+    const customer =
+      user.role === "customer"
+        ? await Customer.findOne({ userId: user._id }).lean()
+        : null;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        user: sanitizeUser(user),
+        customer,
+      },
+    });
+  } catch (error) {
+    return sendError(error, res, "Could not fetch account");
+  }
+};
+
+export {
+  login,
+  login as loginUser,
+  registerUser,
+  registerUser as register,
+  registerAccountByAdmin,
+  registerAccountByAdmin as adminRegister,
+  getMe,
+  getMe as getProfile,
 };

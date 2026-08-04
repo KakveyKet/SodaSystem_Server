@@ -14,6 +14,7 @@ import lotteryChiefBalanceRoutes from './routes/lotteryChiefBalance.routes.js';
 import chiefExpenseRoutes from './routes/chiefExpense.routes.js';
 import lotteryPlayRoutes from './routes/lotteryPlay.routes.js';
 import rateRoutes from './routes/rate.routes.js';
+import customerInvoiceRoutes from "./routes/customerInvoice.routes.js";
 import {
   swaggerUi,
   swaggerSpec,
@@ -86,6 +87,10 @@ app.use('/api/lottery-chief-balances', lotteryChiefBalanceRoutes);
 app.use('/api/chief-expenses', chiefExpenseRoutes);
 app.use('/api/lottery-plays', lotteryPlayRoutes);
 app.use('/api/rates', rateRoutes);
+app.use(
+  "/api/customer-invoices",
+  customerInvoiceRoutes
+);
 /**
  * Error Middleware
  */

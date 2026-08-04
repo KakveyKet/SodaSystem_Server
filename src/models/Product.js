@@ -1,61 +1,142 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
-const productSchema = new mongoose.Schema(
+const { Schema } = mongoose;
+
+const productSchema = new Schema(
   {
-    category: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Category',
-      required: [true, 'Category is required']
-    },
-
     name: {
       type: String,
-      required: [true, 'Product name is required'],
-      trim: true
-    },
-
-    winMultiplier: {
-      type: Number,
-      required: [true, 'Win multiplier is required'],
-      default: 1,
-      min: [0, 'Win multiplier cannot be negative']
+      required: [
+        true,
+        "Product name is required",
+      ],
+      trim: true,
+      maxlength: [
+        150,
+        "Product name cannot exceed 150 characters",
+      ],
     },
 
     description: {
       type: String,
-      default: '',
-      trim: true
+      trim: true,
+      default: "",
+      maxlength: [
+        1000,
+        "Product description cannot exceed 1000 characters",
+      ],
+    },
+
+    winMultiplier: {
+      type: Number,
+      required: [
+        true,
+        "Win multiplier is required",
+      ],
+      default: 1,
+      min: [
+        0,
+        "Win multiplier cannot be negative",
+      ],
+      validate: {
+        validator(value) {
+          return Number.isFinite(
+            Number(value),
+          );
+        },
+        message:
+          "Win multiplier must be a valid number",
+      },
     },
 
     status: {
       type: Boolean,
-      default: true
+      default: true,
     },
 
     createdBy: {
       type: String,
-      default: 'System'
+      trim: true,
+      default: "System",
     },
 
     updatedBy: {
       type: String,
-      default: 'System'
-    }
+      trim: true,
+      default: "System",
+    },
   },
   {
     timestamps: true,
-    toJSON: {
-      virtuals: true,
-      versionKey: false,
-      transform(doc, ret) {
-        ret.id = ret._id.toString();
-        delete ret._id;
-        return ret;
-      }
-    }
-  }
+    versionKey: false,
+  },
 );
 
-const Product = mongoose.model('Product', productSchema);
+productSchema.pre(
+  "validate",
+  function normalizeProduct() {
+    if (
+      typeof this.name ===
+      "string"
+    ) {
+      this.name =
+        this.name
+          .replace(/\s+/g, " ")
+          .trim();
+    }
+
+    if (
+      typeof this.description ===
+      "string"
+    ) {
+      this.description =
+        this.description.trim();
+    }
+
+    if (
+      this.winMultiplier !==
+        null &&
+      this.winMultiplier !==
+        undefined
+    ) {
+      this.winMultiplier =
+        Number(
+          this.winMultiplier,
+        );
+    }
+
+    if (
+      typeof this.createdBy ===
+      "string"
+    ) {
+      this.createdBy =
+        this.createdBy.trim();
+    }
+
+    if (
+      typeof this.updatedBy ===
+      "string"
+    ) {
+      this.updatedBy =
+        this.updatedBy.trim();
+    }
+  },
+);
+
+productSchema.index({
+  name: 1,
+});
+
+productSchema.index({
+  status: 1,
+  createdAt: -1,
+});
+
+const Product =
+  mongoose.models.Product ||
+  mongoose.model(
+    "Product",
+    productSchema,
+  );
 
 export default Product;

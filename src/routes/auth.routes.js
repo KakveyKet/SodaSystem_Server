@@ -1,12 +1,23 @@
-import express from 'express';
-import { login, logout, register } from '../controllers/auth.controller.js';
-import { validate } from '../middleware/validate.middleware.js';
-import { loginSchema, registerSchema } from '../validators/auth.validator.js';
+import express from "express";
+
+import {
+  getMe,
+  login,
+  registerAccountByAdmin,
+  registerUser,
+} from "../controllers/auth.controller.js";
+
+import { protect } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
-router.post('/register', validate(registerSchema), register);
-router.post('/login', validate(loginSchema), login);
-router.post('/logout', logout);
+router.post("/login", login);
+router.post("/register", registerUser);
+
+/* Preserves your existing public secret admin-registration flow. */
+router.post("/admin-register", registerAccountByAdmin);
+
+router.get("/me", protect, getMe);
+router.get("/profile", protect, getMe);
 
 export default router;

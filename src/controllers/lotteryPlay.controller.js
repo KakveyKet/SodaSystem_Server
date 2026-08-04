@@ -1,685 +1,1333 @@
-import Category from '../models/Category.js';
-import Product from '../models/Product.js';
-import Customer from '../models/Customer.js';
-import LotteryPlay from '../models/LotteryPlay.js';
+import mongoose from "mongoose";
 
-const TWO_DIGIT_RATE_NUMBERS = [100, 101, 102, 103, 104, 105, 106, 107, 108, 109];
-const THREE_DIGIT_RATE_NUMBERS = [65, 70, 75, 80, 85, 90, 95, 100];
+import LotteryPlay from "../models/LotteryPlay.js";
+import Category from "../models/Category.js";
+import Product from "../models/Product.js";
+import Customer from "../models/Customer.js";
+import Rate from "../models/Rate.js";
 
-const PLAY_CATEGORY_FIELD = LotteryPlay.schema.path('categoryId')
-  ? 'categoryId'
-  : 'category';
+const MAX_PAGE_LIMIT = 500;
 
-const PLAY_PRODUCT_FIELD = LotteryPlay.schema.path('productId')
-  ? 'productId'
-  : 'product';
+/*
+|--------------------------------------------------------------------------
+| Error helpers
+|--------------------------------------------------------------------------
+*/
 
-const PLAY_CUSTOMER_FIELD = LotteryPlay.schema.path('customerId')
-  ? 'customerId'
-  : 'customer';
+const createHttpError = (message, statusCode = 400) => {
+  const error = new Error(message);
 
-const PRODUCT_CATEGORY_FIELD = Product.schema.path('categoryId')
-  ? 'categoryId'
-  : 'category';
+  error.statusCode = statusCode;
 
-const parseBoolean = (value) => {
-  if (value === undefined || value === null || value === '') {
-    return null;
+  return error;
+};
+
+const handleControllerError = (error, res, fallbackMessage) => {
+  console.error(`${fallbackMessage}:`, error);
+
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      success: false,
+      message: error.message,
+    });
   }
 
-  if (value === true || value === 'true') {
+  if (error.name === "ValidationError") {
+    const validationMessage = Object.values(error.errors || {})[0]?.message;
+
+    return res.status(400).json({
+      success: false,
+
+      message: validationMessage || "Validation failed",
+    });
+  }
+
+  if (error.name === "CastError") {
+    return res.status(400).json({
+      success: false,
+
+      message: "Invalid data was provided",
+    });
+  }
+
+  if (error.code === 11000) {
+    return res.status(409).json({
+      success: false,
+
+      message: "A duplicate record already exists",
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: fallbackMessage,
+  });
+};
+
+/*
+|--------------------------------------------------------------------------
+| General helpers
+|--------------------------------------------------------------------------
+*/
+
+const escapeRegex = (value = "") => {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+const parsePositiveInteger = (value, fallback) => {
+  const parsedValue = Number.parseInt(value, 10);
+
+  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+    return fallback;
+  }
+
+  return parsedValue;
+};
+
+const parseBooleanValue = (value) => {
+  if (value === true || value === "true" || value === 1 || value === "1") {
     return true;
   }
 
-  if (value === false || value === 'false') {
+  if (value === false || value === "false" || value === 0 || value === "0") {
     return false;
+  }
+
+  return undefined;
+};
+
+const normalizeBoolean = (value, fallback = false) => {
+  const parsedValue = parseBooleanValue(value);
+
+  if (parsedValue !== undefined) {
+    return parsedValue;
+  }
+
+  return fallback;
+};
+
+const getActorName = (req) => {
+  return req.user?.username || req.user?.name || req.user?.email || "System";
+};
+
+const getValueId = (value) => {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (mongoose.isValidObjectId(value)) {
+    return String(value);
+  }
+
+  if (typeof value === "object") {
+    const nestedValue = value._id || value.id || null;
+
+    if (nestedValue && mongoose.isValidObjectId(nestedValue)) {
+      return String(nestedValue);
+    }
   }
 
   return null;
 };
 
-const escapeRegex = (value = '') => {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const validateObjectId = (value, fieldName) => {
+  const objectId = getValueId(value);
+
+  if (!objectId) {
+    throw createHttpError(`${fieldName} is invalid`, 400);
+  }
+
+  return objectId;
 };
 
-const getUserLabel = (req) => {
-  return req.user?.name || req.user?.email || 'System';
+const normalizeRequiredDate = (value, fieldName) => {
+  if (!value) {
+    throw createHttpError(`${fieldName} is required`, 400);
+  }
+
+  const text = String(value).trim();
+
+  let date;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    date = new Date(`${text}T00:00:00.000Z`);
+  } else {
+    date = new Date(value);
+  }
+
+  if (Number.isNaN(date.getTime())) {
+    throw createHttpError(`${fieldName} is invalid`, 400);
+  }
+
+  return date;
 };
 
-const getModelId = (value) => {
+const parseDateBoundary = (value, endOfDay = false) => {
   if (!value) {
     return null;
   }
 
-  if (typeof value === 'object') {
-    return value._id || value.id || null;
+  const text = String(value).trim();
+
+  let date;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    date = new Date(`${text}T${endOfDay ? "23:59:59.999Z" : "00:00:00.000Z"}`);
+  } else {
+    date = new Date(text);
   }
-
-  return value;
-};
-
-const getStartOfDay = (value) => {
-  const date = value ? new Date(value) : new Date();
-  date.setHours(0, 0, 0, 0);
-  return date;
-};
-
-const getEndOfDay = (value) => {
-  const date = value ? new Date(value) : new Date();
-  date.setHours(23, 59, 59, 999);
-  return date;
-};
-
-const buildPlayCategoryFilter = (categoryId) => ({
-  $or: [{ categoryId }, { category: categoryId }]
-});
-
-const buildPlayProductFilter = (productId) => ({
-  $or: [{ productId }, { product: productId }]
-});
-
-const buildPlayCustomerFilter = (customerId) => ({
-  $or: [{ customerId }, { customer: customerId }]
-});
-
-const applyPlayPopulate = (query) => {
-  if (LotteryPlay.schema.path('categoryId')) {
-    query.populate('categoryId', 'name status');
-  }
-
-  if (LotteryPlay.schema.path('category')) {
-    query.populate('category', 'name status');
-  }
-
-  if (LotteryPlay.schema.path('productId')) {
-    query.populate('productId', 'name status winMultiplier');
-  }
-
-  if (LotteryPlay.schema.path('product')) {
-    query.populate('product', 'name status winMultiplier');
-  }
-
-  if (LotteryPlay.schema.path('customerId')) {
-    query.populate(
-      'customerId',
-      'username branchId phoneNumber address description balance status'
-    );
-  }
-
-  if (LotteryPlay.schema.path('customer')) {
-    query.populate(
-      'customer',
-      'username branchId phoneNumber address description balance status'
-    );
-  }
-
-  return query;
-};
-
-const validatePlayAssociation = async (categoryId, productId, customerId) => {
-  if (!categoryId) {
-    return 'Category is required';
-  }
-
-  if (!productId) {
-    return 'Product is required';
-  }
-
-  if (!customerId) {
-    return 'Customer is required';
-  }
-
-  const category = await Category.findById(categoryId);
-
-  if (!category) {
-    return 'Category does not exist';
-  }
-
-  const product = await Product.findById(productId);
-
-  if (!product) {
-    return 'Product does not exist';
-  }
-
-  const customer = await Customer.findById(customerId);
-
-  if (!customer) {
-    return 'Customer does not exist';
-  }
-
-  const productCategoryId =
-    getModelId(product[PRODUCT_CATEGORY_FIELD]) ||
-    getModelId(product.categoryId) ||
-    getModelId(product.category);
-
-  if (!productCategoryId) {
-    return 'Selected product does not have category';
-  }
-
-  if (String(productCategoryId) !== String(categoryId)) {
-    return 'Selected product does not belong to selected category';
-  }
-
-  return '';
-};
-
-const validatePlayDate = (playDate) => {
-  if (!playDate) {
-    return 'Play date is required';
-  }
-
-  const date = new Date(playDate);
 
   if (Number.isNaN(date.getTime())) {
-    return 'Play date is invalid';
+    throw createHttpError(`Invalid date: ${text}`, 400);
   }
 
-  return '';
+  return date;
 };
 
-const validateRates = (twoDigitRate, threeDigitRate) => {
-  if (!TWO_DIGIT_RATE_NUMBERS.includes(Number(twoDigitRate))) {
-    return 'Please select valid 2D rate';
+const appendAndCondition = (filter, condition) => {
+  if (!Array.isArray(filter.$and)) {
+    filter.$and = [];
   }
 
-  if (!THREE_DIGIT_RATE_NUMBERS.includes(Number(threeDigitRate))) {
-    return 'Please select valid 3D rate';
-  }
-
-  return '';
+  filter.$and.push(condition);
 };
 
-const validateRows = (rows = []) => {
+const parseCommaSeparatedIds = (value, fieldName) => {
+  const source = Array.isArray(value) ? value : String(value).split(",");
+
+  const ids = source
+    .map((item) => {
+      return String(item).trim();
+    })
+    .filter(Boolean)
+    .map((item) => {
+      return validateObjectId(item, fieldName);
+    });
+
+  return Array.from(new Set(ids));
+};
+
+/*
+|--------------------------------------------------------------------------
+| Multiple-reference input helper
+|--------------------------------------------------------------------------
+*/
+
+const getMultipleReferenceInput = ({
+  body = {},
+  pluralField,
+  legacyField,
+  label,
+}) => {
+  const hasPluralField = Object.prototype.hasOwnProperty.call(
+    body,
+    pluralField,
+  );
+
+  const hasLegacyField = Object.prototype.hasOwnProperty.call(
+    body,
+    legacyField,
+  );
+
+  if (!hasPluralField && !hasLegacyField) {
+    return {
+      provided: false,
+      ids: null,
+    };
+  }
+
+  const source = hasPluralField ? body[pluralField] : [body[legacyField]];
+
+  if (!Array.isArray(source)) {
+    throw createHttpError(`${pluralField} must be an array`, 400);
+  }
+
+  const cleanedSource = source.filter((value) => {
+    return value !== null && value !== undefined && value !== "";
+  });
+
+  if (cleanedSource.length === 0) {
+    throw createHttpError(
+      `At least one ${label.toLowerCase()} is required`,
+      400,
+    );
+  }
+
+  const ids = cleanedSource.map((referenceValue) => {
+    return validateObjectId(referenceValue, `${label} ID`);
+  });
+
+  const uniqueIds = Array.from(new Set(ids));
+
+  if (uniqueIds.length !== ids.length) {
+    throw createHttpError(
+      `Duplicate ${label.toLowerCase()} selections are not allowed`,
+      400,
+    );
+  }
+
+  return {
+    provided: true,
+    ids: uniqueIds,
+  };
+};
+
+/*
+|--------------------------------------------------------------------------
+| Category helpers
+|--------------------------------------------------------------------------
+*/
+
+const getCategoryInput = (body = {}) => {
+  const result = getMultipleReferenceInput({
+    body,
+
+    pluralField: "categoryIds",
+
+    legacyField: "categoryId",
+
+    label: "Category",
+  });
+
+  return {
+    provided: result.provided,
+
+    categoryIds: result.ids,
+  };
+};
+
+const validateCategories = async (categoryIds) => {
+  if (!Array.isArray(categoryIds) || categoryIds.length === 0) {
+    throw createHttpError("At least one category is required", 400);
+  }
+
+  const categories = await Category.find({
+    _id: {
+      $in: categoryIds,
+    },
+  })
+    .select("_id name status")
+    .lean();
+
+  if (categories.length !== categoryIds.length) {
+    throw createHttpError("One or more selected categories do not exist", 404);
+  }
+
+  const inactiveCategory = categories.find((category) => {
+    return category.status === false;
+  });
+
+  if (inactiveCategory) {
+    throw createHttpError(
+      `Category "${inactiveCategory.name}" is inactive`,
+      400,
+    );
+  }
+
+  return categories;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Product helpers
+|--------------------------------------------------------------------------
+*/
+
+const getProductInput = (body = {}) => {
+  const result = getMultipleReferenceInput({
+    body,
+
+    pluralField: "productIds",
+
+    legacyField: "productId",
+
+    label: "Product",
+  });
+
+  return {
+    provided: result.provided,
+
+    productIds: result.ids,
+  };
+};
+
+const validateProducts = async (productIds) => {
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    throw createHttpError("At least one product is required", 400);
+  }
+
+  const products = await Product.find({
+    _id: {
+      $in: productIds,
+    },
+  })
+    .select("_id name status winMultiplier")
+    .lean();
+
+  if (products.length !== productIds.length) {
+    throw createHttpError("One or more selected products do not exist", 404);
+  }
+
+  const inactiveProduct = products.find((product) => {
+    return product.status === false;
+  });
+
+  if (inactiveProduct) {
+    throw createHttpError(`Product "${inactiveProduct.name}" is inactive`, 400);
+  }
+
+  /*
+   * Products and Categories are independent.
+   *
+   * There is no Product-Category validation here.
+   */
+  return products;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Customer helper
+|--------------------------------------------------------------------------
+*/
+
+const validateCustomer = async (customerId) => {
+  const customer = await Customer.findById(customerId)
+    .select("_id username status")
+    .lean();
+
+  if (!customer) {
+    throw createHttpError("Customer not found", 404);
+  }
+
+  if (customer.status === false) {
+    throw createHttpError("The selected customer is inactive", 400);
+  }
+
+  return customer;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Rate helpers
+|--------------------------------------------------------------------------
+*/
+
+const normalizeRateNumber = (value, fieldName) => {
+  const number = Number(value);
+
+  if (!Number.isFinite(number) || number <= 0) {
+    throw createHttpError(`${fieldName} is invalid`, 400);
+  }
+
+  return number;
+};
+
+const resolveActiveRate = async (value, fieldName) => {
+  const number = normalizeRateNumber(value, fieldName);
+
+  const rate = await Rate.findOne({
+    number,
+    status: true,
+  })
+    .select("_id name number status")
+    .lean();
+
+  if (!rate) {
+    throw createHttpError(`${fieldName} does not exist or is inactive`, 400);
+  }
+
+  return rate;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Row number validation
+|--------------------------------------------------------------------------
+|
+| There is no maximum value for 2D or 3D.
+|
+*/
+
+const validatePlayNumber = (value, rowNumber, numberType) => {
+  if (value === null || value === undefined || value === "") {
+    throw createHttpError(
+      `Row ${rowNumber} ${numberType} number is required`,
+      400,
+    );
+  }
+
+  const number = Number(value);
+
+  if (!Number.isFinite(number)) {
+    throw createHttpError(
+      `Row ${rowNumber} has an invalid ${numberType} number`,
+      400,
+    );
+  }
+
+  if (number < 0) {
+    throw createHttpError(
+      `Row ${rowNumber} ${numberType} number cannot be negative`,
+      400,
+    );
+  }
+
+  return number;
+};
+
+const validateTwoDigitNumber = (value, rowNumber) => {
+  return validatePlayNumber(value, rowNumber, "2D");
+};
+
+const validateThreeDigitNumber = (value, rowNumber) => {
+  return validatePlayNumber(value, rowNumber, "3D");
+};
+
+const normalizeNonNegativeNumber = (value, fieldName) => {
+  const number = Number(value ?? 0);
+
+  if (!Number.isFinite(number) || number < 0) {
+    throw createHttpError(
+      `${fieldName} must be a valid non-negative number`,
+      400,
+    );
+  }
+
+  return number;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Normalize rows
+|--------------------------------------------------------------------------
+*/
+
+const normalizeRows = (rows) => {
   if (!Array.isArray(rows) || rows.length === 0) {
-    return 'At least one play row is required';
+    throw createHttpError("At least one play row is required", 400);
   }
 
-  for (let index = 0; index < rows.length; index += 1) {
-    const row = rows[index];
-    const label = `Row ${index + 1}`;
+  return rows.map((row, index) => {
+    const rowNumber = index + 1;
 
-    if (!row.rowTitle || !row.rowTitle.trim()) {
-      return `${label}: Row name is required`;
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw createHttpError(`Row ${rowNumber} is invalid`, 400);
     }
 
-    if (row.isTwoNumber) {
-      if (row.twoDigitNumber === null || row.twoDigitNumber === undefined) {
-        return `${label}: 2D number is required`;
-      }
+    const rowTitle = String(row.rowTitle ?? "").trim();
 
-      if (Number(row.twoDigitNumber) < 0 || Number(row.twoDigitNumber) > 99) {
-        return `${label}: 2D number must be between 0 and 99`;
-      }
-
-      if (Number(row.twoDigitAmount || 0) < 0) {
-        return `${label}: 2D amount cannot be negative`;
-      }
-
-      if (Number(row.winTwoNumberType || 0) < 0) {
-        return `${label}: 2D type cannot be negative`;
-      }
+    if (!rowTitle) {
+      throw createHttpError(`Row ${rowNumber} title is required`, 400);
     }
 
-    if (row.isThreeNumber) {
-      if (row.threeDigitNumber === null || row.threeDigitNumber === undefined) {
-        return `${label}: 3D number is required`;
-      }
+    const isTwoNumber = normalizeBoolean(row.isTwoNumber, false);
 
-      if (Number(row.threeDigitNumber) < 0 || Number(row.threeDigitNumber) > 999) {
-        return `${label}: 3D number must be between 0 and 999`;
-      }
+    const isThreeNumber = normalizeBoolean(row.isThreeNumber, false);
 
-      if (Number(row.threeDigitAmount || 0) < 0) {
-        return `${label}: 3D amount cannot be negative`;
-      }
+    const twoDigitNumber = isTwoNumber
+      ? validateTwoDigitNumber(row.twoDigitNumber, rowNumber)
+      : null;
 
-      if (Number(row.winThreeNumberType || 0) < 0) {
-        return `${label}: 3D type cannot be negative`;
-      }
+    const threeDigitNumber = isThreeNumber
+      ? validateThreeDigitNumber(row.threeDigitNumber, rowNumber)
+      : null;
+
+    const winTwoNumberType = isTwoNumber
+      ? normalizeNonNegativeNumber(
+          row.winTwoNumberType,
+          `Row ${rowNumber} correct 2D value`,
+        )
+      : 0;
+
+    const winThreeNumberType = isThreeNumber
+      ? normalizeNonNegativeNumber(
+          row.winThreeNumberType,
+          `Row ${rowNumber} correct 3D value`,
+        )
+      : 0;
+
+    const twoDigitAmount = isTwoNumber
+      ? normalizeNonNegativeNumber(
+          row.twoDigitAmount,
+          `Row ${rowNumber} 2D amount`,
+        )
+      : 0;
+
+    const threeDigitAmount = isThreeNumber
+      ? normalizeNonNegativeNumber(
+          row.threeDigitAmount,
+          `Row ${rowNumber} 3D amount`,
+        )
+      : 0;
+
+    const normalizedRow = {
+      rowTitle,
+
+      twoDigitNumber,
+      threeDigitNumber,
+
+      winTwoNumberType,
+      winThreeNumberType,
+
+      twoDigitAmount,
+      threeDigitAmount,
+
+      isTwoNumber,
+      isThreeNumber,
+
+      checkedStatus: normalizeBoolean(row.checkedStatus, false),
+    };
+
+    const rowId = getValueId(row._id || row.id);
+
+    if (rowId) {
+      normalizedRow._id = rowId;
     }
+
+    return normalizedRow;
+  });
+};
+
+/*
+|--------------------------------------------------------------------------
+| Population helper
+|--------------------------------------------------------------------------
+*/
+
+const populateLotteryPlay = (query) => {
+  return query
+    .populate({
+      path: "categoryIds",
+
+      select: "name description status",
+    })
+
+    .populate({
+      path: "categoryId",
+
+      select: "name description status",
+    })
+
+    .populate({
+      path: "productIds",
+
+      select: "name winMultiplier description status",
+    })
+
+    .populate({
+      path: "productId",
+
+      select: "name winMultiplier description status",
+    })
+
+    .populate({
+      path: "customerId",
+
+      select:
+        "username branchId phoneNumber address description balance status",
+    });
+};
+
+/*
+|--------------------------------------------------------------------------
+| Normalize old populated invoices
+|--------------------------------------------------------------------------
+*/
+
+const normalizePopulatedPlay = (lotteryPlay) => {
+  if (!lotteryPlay) {
+    return lotteryPlay;
   }
 
-  return '';
+  if (
+    (!Array.isArray(lotteryPlay.categoryIds) ||
+      lotteryPlay.categoryIds.length === 0) &&
+    lotteryPlay.categoryId
+  ) {
+    lotteryPlay.categoryIds = [lotteryPlay.categoryId];
+  }
+
+  if (
+    !lotteryPlay.categoryId &&
+    Array.isArray(lotteryPlay.categoryIds) &&
+    lotteryPlay.categoryIds.length > 0
+  ) {
+    lotteryPlay.categoryId = lotteryPlay.categoryIds[0];
+  }
+
+  if (
+    (!Array.isArray(lotteryPlay.productIds) ||
+      lotteryPlay.productIds.length === 0) &&
+    lotteryPlay.productId
+  ) {
+    lotteryPlay.productIds = [lotteryPlay.productId];
+  }
+
+  if (
+    !lotteryPlay.productId &&
+    Array.isArray(lotteryPlay.productIds) &&
+    lotteryPlay.productIds.length > 0
+  ) {
+    lotteryPlay.productId = lotteryPlay.productIds[0];
+  }
+
+  return lotteryPlay;
 };
 
-const normalizeRows = (rows = []) => {
-  return rows.map((row) => ({
-    rowTitle: row.rowTitle.trim(),
-
-    twoDigitNumber: row.isTwoNumber ? Number(row.twoDigitNumber) : null,
-    threeDigitNumber: row.isThreeNumber ? Number(row.threeDigitNumber) : null,
-
-    winTwoNumberType: row.isTwoNumber ? Number(row.winTwoNumberType || 0) : 0,
-    winThreeNumberType: row.isThreeNumber ? Number(row.winThreeNumberType || 0) : 0,
-
-    twoDigitAmount: row.isTwoNumber ? Number(row.twoDigitAmount || 0) : 0,
-    threeDigitAmount: row.isThreeNumber ? Number(row.threeDigitAmount || 0) : 0,
-
-    isTwoNumber: Boolean(row.isTwoNumber),
-    isThreeNumber: Boolean(row.isThreeNumber),
-
-    checkedStatus: false
-  }));
+const normalizePopulatedPlays = (lotteryPlays) => {
+  return lotteryPlays.map(normalizePopulatedPlay);
 };
 
-export const getLotteryPlays = async (req, res, next) => {
+/*
+|--------------------------------------------------------------------------
+| GET /api/lottery-plays
+|--------------------------------------------------------------------------
+*/
+
+const getLotteryPlays = async (req, res) => {
   try {
-    const page = Math.max(Number(req.query.page || 1), 1);
-    const limit = Math.max(Number(req.query.limit || 10), 1);
+    const page = parsePositiveInteger(req.query.page, 1);
+
+    const limit = Math.min(
+      parsePositiveInteger(req.query.limit, 10),
+      MAX_PAGE_LIMIT,
+    );
+
     const skip = (page - 1) * limit;
 
     const filter = {};
-    const andFilters = [];
 
-    if (req.query.search) {
-      const search = escapeRegex(req.query.search.trim());
+    /*
+      |--------------------------------------------------------------------------
+      | Search
+      |--------------------------------------------------------------------------
+      */
 
-      andFilters.push({
+    const search = String(req.query.search ?? "").trim();
+
+    if (search) {
+      const safeSearch = escapeRegex(search);
+
+      filter.$or = [
+        {
+          title: {
+            $regex: safeSearch,
+
+            $options: "i",
+          },
+        },
+
+        {
+          "rows.rowTitle": {
+            $regex: safeSearch,
+
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    /*
+      |--------------------------------------------------------------------------
+      | Single category filter
+      |--------------------------------------------------------------------------
+      */
+
+    if (req.query.categoryId) {
+      const categoryId = validateObjectId(req.query.categoryId, "Category ID");
+
+      appendAndCondition(filter, {
         $or: [
           {
-            title: {
-              $regex: search,
-              $options: 'i'
-            }
+            categoryIds: categoryId,
           },
+
           {
-            'rows.rowTitle': {
-              $regex: search,
-              $options: 'i'
-            }
-          }
-        ]
+            categoryId,
+          },
+        ],
       });
     }
 
-    if (req.query.categoryId) {
-      andFilters.push(buildPlayCategoryFilter(req.query.categoryId));
+    /*
+      |--------------------------------------------------------------------------
+      | Multiple category filter
+      |--------------------------------------------------------------------------
+      |
+      | categoryIds=id1,id2
+      |
+      | The invoice must contain all supplied categories.
+      |
+      */
+
+    if (req.query.categoryIds) {
+      const categoryIds = parseCommaSeparatedIds(
+        req.query.categoryIds,
+        "Category ID",
+      );
+
+      if (categoryIds.length === 1) {
+        appendAndCondition(filter, {
+          $or: [
+            {
+              categoryIds: categoryIds[0],
+            },
+
+            {
+              categoryId: categoryIds[0],
+            },
+          ],
+        });
+      } else if (categoryIds.length > 1) {
+        appendAndCondition(filter, {
+          categoryIds: {
+            $all: categoryIds,
+          },
+        });
+      }
     }
+
+    /*
+      |--------------------------------------------------------------------------
+      | Single product filter
+      |--------------------------------------------------------------------------
+      */
 
     if (req.query.productId) {
-      andFilters.push(buildPlayProductFilter(req.query.productId));
+      const productId = validateObjectId(req.query.productId, "Product ID");
+
+      appendAndCondition(filter, {
+        $or: [
+          {
+            productIds: productId,
+          },
+
+          {
+            productId,
+          },
+        ],
+      });
     }
+
+    /*
+      |--------------------------------------------------------------------------
+      | Multiple product filter
+      |--------------------------------------------------------------------------
+      |
+      | productIds=id1,id2
+      |
+      */
+
+    if (req.query.productIds) {
+      const productIds = parseCommaSeparatedIds(
+        req.query.productIds,
+        "Product ID",
+      );
+
+      if (productIds.length === 1) {
+        appendAndCondition(filter, {
+          $or: [
+            {
+              productIds: productIds[0],
+            },
+
+            {
+              productId: productIds[0],
+            },
+          ],
+        });
+      } else if (productIds.length > 1) {
+        appendAndCondition(filter, {
+          productIds: {
+            $all: productIds,
+          },
+        });
+      }
+    }
+
+    /*
+      |--------------------------------------------------------------------------
+      | Customer filter
+      |--------------------------------------------------------------------------
+      */
 
     if (req.query.customerId) {
-      andFilters.push(buildPlayCustomerFilter(req.query.customerId));
+      filter.customerId = validateObjectId(req.query.customerId, "Customer ID");
     }
 
-    const status = parseBoolean(req.query.status);
+    /*
+      |--------------------------------------------------------------------------
+      | Status filters
+      |--------------------------------------------------------------------------
+      */
 
-    if (status !== null) {
-      andFilters.push({ status });
+    const status = parseBooleanValue(req.query.status);
+
+    if (status !== undefined) {
+      filter.status = status;
     }
 
-    const startDate = getStartOfDay(req.query.dateFrom);
-    const endDate = getEndOfDay(req.query.dateTo || req.query.dateFrom);
+    const checkedStatus = parseBooleanValue(req.query.checkedStatus);
 
-    andFilters.push({
-      $or: [
-        {
-          playDate: {
-            $gte: startDate,
-            $lte: endDate
-          }
-        },
-        {
-          playDate: {
-            $exists: false
-          },
-          createdAt: {
-            $gte: startDate,
-            $lte: endDate
-          }
-        },
-        {
-          playDate: null,
-          createdAt: {
-            $gte: startDate,
-            $lte: endDate
-          }
-        }
-      ]
-    });
-
-    if (andFilters.length > 0) {
-      filter.$and = andFilters;
+    if (checkedStatus !== undefined) {
+      filter.checkedStatus = checkedStatus;
     }
+
+    /*
+      |--------------------------------------------------------------------------
+      | Date filter
+      |--------------------------------------------------------------------------
+      */
+
+    const dateFrom = parseDateBoundary(req.query.dateFrom, false);
+
+    const dateTo = parseDateBoundary(req.query.dateTo, true);
+
+    if (dateFrom || dateTo) {
+      filter.playDate = {};
+
+      if (dateFrom) {
+        filter.playDate.$gte = dateFrom;
+      }
+
+      if (dateTo) {
+        filter.playDate.$lte = dateTo;
+      }
+    }
+
+    /*
+      |--------------------------------------------------------------------------
+      | Query
+      |--------------------------------------------------------------------------
+      */
 
     const [lotteryPlays, total] = await Promise.all([
-      applyPlayPopulate(
-        LotteryPlay.find(filter)
-          .sort({
-            playDate: -1,
-            createdAt: -1
-          })
-          .skip(skip)
-          .limit(limit)
-      ),
-      LotteryPlay.countDocuments(filter)
+      populateLotteryPlay(LotteryPlay.find(filter))
+        .sort({
+          playDate: -1,
+          createdAt: -1,
+          _id: -1,
+        })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+
+      LotteryPlay.countDocuments(filter),
     ]);
+
+    const pages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({
       success: true,
-      data: lotteryPlays,
+
+      data: normalizePopulatedPlays(lotteryPlays),
+
       pagination: {
         page,
         limit,
         total,
-        totalPages: Math.ceil(total / limit)
-      }
+        pages,
+      },
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not fetch invoices");
   }
 };
 
-export const getLotteryPlayById = async (req, res, next) => {
+/*
+|--------------------------------------------------------------------------
+| GET /api/lottery-plays/:id
+|--------------------------------------------------------------------------
+*/
+
+const getLotteryPlayById = async (req, res) => {
   try {
-    const lotteryPlay = await applyPlayPopulate(
-      LotteryPlay.findById(req.params.id)
-    );
+    const playId = validateObjectId(req.params.id, "Invoice ID");
+
+    const lotteryPlay = await populateLotteryPlay(
+      LotteryPlay.findById(playId),
+    ).lean();
 
     if (!lotteryPlay) {
-      return res.status(404).json({
-        success: false,
-        message: 'Play not found'
-      });
+      throw createHttpError("Invoice not found", 404);
     }
 
     return res.status(200).json({
       success: true,
-      data: lotteryPlay
+
+      data: normalizePopulatedPlay(lotteryPlay),
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not fetch invoice");
   }
 };
 
-export const createLotteryPlay = async (req, res, next) => {
+/*
+|--------------------------------------------------------------------------
+| POST /api/lottery-plays
+|--------------------------------------------------------------------------
+*/
+
+const createLotteryPlay = async (req, res) => {
   try {
-    const {
-      categoryId,
-      category,
-      productId,
-      product,
-      customerId,
-      customer,
-      playDate,
-      title,
-      rows,
-      twoDigitRate = 100,
-      threeDigitRate = 100,
-      status
-    } = req.body;
+    const title = String(req.body.title ?? "").trim();
 
-    const nextCategoryId = categoryId || category;
-    const nextProductId = productId || product;
-    const nextCustomerId = customerId || customer;
-
-    if (!title || !title.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Play name is required'
-      });
+    if (!title) {
+      throw createHttpError("Invoice name is required", 400);
     }
 
-    const associationError = await validatePlayAssociation(
-      nextCategoryId,
-      nextProductId,
-      nextCustomerId
-    );
+    const categoryInput = getCategoryInput(req.body);
 
-    if (associationError) {
-      return res.status(400).json({
-        success: false,
-        message: associationError
-      });
+    if (!categoryInput.provided) {
+      throw createHttpError("At least one category is required", 400);
     }
 
-    const dateError = validatePlayDate(playDate);
+    const productInput = getProductInput(req.body);
 
-    if (dateError) {
-      return res.status(400).json({
-        success: false,
-        message: dateError
-      });
+    if (!productInput.provided) {
+      throw createHttpError("At least one product is required", 400);
     }
 
-    const rateError = validateRates(twoDigitRate, threeDigitRate);
+    const categoryIds = categoryInput.categoryIds;
 
-    if (rateError) {
-      return res.status(400).json({
-        success: false,
-        message: rateError
-      });
-    }
+    const productIds = productInput.productIds;
 
-    const rowError = validateRows(rows);
+    const customerId = validateObjectId(req.body.customerId, "Customer ID");
 
-    if (rowError) {
-      return res.status(400).json({
-        success: false,
-        message: rowError
-      });
-    }
+    const playDate = normalizeRequiredDate(req.body.playDate, "Invoice date");
+
+    const rows = normalizeRows(req.body.rows);
+
+    const [categories, products, customer, twoDigitRate, threeDigitRate] =
+      await Promise.all([
+        validateCategories(categoryIds),
+
+        validateProducts(productIds),
+
+        validateCustomer(customerId),
+
+        resolveActiveRate(req.body.twoDigitRate, "2D rate"),
+
+        resolveActiveRate(req.body.threeDigitRate, "3D rate"),
+      ]);
+
+    void categories;
+    void products;
+    void customer;
+
+    const status = parseBooleanValue(req.body.status);
+
+    const actor = getActorName(req);
 
     const lotteryPlay = await LotteryPlay.create({
-      [PLAY_CATEGORY_FIELD]: nextCategoryId,
-      [PLAY_PRODUCT_FIELD]: nextProductId,
-      [PLAY_CUSTOMER_FIELD]: nextCustomerId,
-      playDate: new Date(playDate),
-      title: title.trim(),
-      twoDigitRate: Number(twoDigitRate),
-      threeDigitRate: Number(threeDigitRate),
-      rows: normalizeRows(rows),
-      status: status !== false,
-      createdBy: getUserLabel(req),
-      updatedBy: getUserLabel(req)
+      title,
+
+      categoryIds,
+
+      categoryId: categoryIds[0],
+
+      productIds,
+
+      productId: productIds[0],
+
+      customerId,
+
+      playDate,
+
+      twoDigitRate: twoDigitRate.number,
+
+      threeDigitRate: threeDigitRate.number,
+
+      rows,
+
+      checkedStatus: false,
+
+      status: status !== undefined ? status : true,
+
+      createdBy: actor,
+
+      updatedBy: actor,
     });
 
-    const populatedPlay = await applyPlayPopulate(
-      LotteryPlay.findById(lotteryPlay._id)
-    );
+    const populatedPlay = await populateLotteryPlay(
+      LotteryPlay.findById(lotteryPlay._id),
+    ).lean();
 
     return res.status(201).json({
       success: true,
-      message: 'Play created successfully',
-      data: populatedPlay
+
+      message: "Invoice created successfully",
+
+      data: normalizePopulatedPlay(populatedPlay),
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not create invoice");
   }
 };
 
-export const updateLotteryPlay = async (req, res, next) => {
+/*
+|--------------------------------------------------------------------------
+| PUT /api/lottery-plays/:id
+|--------------------------------------------------------------------------
+*/
+
+const updateLotteryPlay = async (req, res) => {
   try {
-    const lotteryPlay = await LotteryPlay.findById(req.params.id);
+    const playId = validateObjectId(req.params.id, "Invoice ID");
+
+    const lotteryPlay = await LotteryPlay.findById(playId);
 
     if (!lotteryPlay) {
-      return res.status(404).json({
-        success: false,
-        message: 'Play not found'
-      });
+      throw createHttpError("Invoice not found", 404);
     }
 
-    const nextCategoryId =
-      req.body.categoryId ||
-      req.body.category ||
-      lotteryPlay.categoryId ||
-      lotteryPlay.category;
+    const categoryInput = getCategoryInput(req.body);
 
-    const nextProductId =
-      req.body.productId ||
-      req.body.product ||
-      lotteryPlay.productId ||
-      lotteryPlay.product;
+    const productInput = getProductInput(req.body);
 
-    const nextCustomerId =
-      req.body.customerId ||
-      req.body.customer ||
-      lotteryPlay.customerId ||
-      lotteryPlay.customer;
+    let customerId = null;
 
-    const nextPlayDate =
-      req.body.playDate !== undefined ? req.body.playDate : lotteryPlay.playDate;
+    let twoDigitRate = null;
 
-    const nextTitle =
-      req.body.title !== undefined ? req.body.title : lotteryPlay.title;
+    let threeDigitRate = null;
 
-    const nextTwoDigitRate =
-      req.body.twoDigitRate !== undefined
-        ? req.body.twoDigitRate
-        : lotteryPlay.twoDigitRate;
+    const validations = [];
 
-    const nextThreeDigitRate =
-      req.body.threeDigitRate !== undefined
-        ? req.body.threeDigitRate
-        : lotteryPlay.threeDigitRate;
+    /*
+      |--------------------------------------------------------------------------
+      | Reference validation
+      |--------------------------------------------------------------------------
+      */
 
-    const nextRows = Array.isArray(req.body.rows)
-      ? req.body.rows
-      : lotteryPlay.rows.map((row) => {
-          return row.toObject ? row.toObject() : row;
-        });
-
-    if (!nextTitle || !nextTitle.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Play name is required'
-      });
+    if (categoryInput.provided) {
+      validations.push(validateCategories(categoryInput.categoryIds));
     }
 
-    const associationError = await validatePlayAssociation(
-      nextCategoryId,
-      nextProductId,
-      nextCustomerId
-    );
-
-    if (associationError) {
-      return res.status(400).json({
-        success: false,
-        message: associationError
-      });
+    if (productInput.provided) {
+      validations.push(validateProducts(productInput.productIds));
     }
 
-    const dateError = validatePlayDate(nextPlayDate);
+    if (req.body.customerId !== undefined) {
+      customerId = validateObjectId(req.body.customerId, "Customer ID");
 
-    if (dateError) {
-      return res.status(400).json({
-        success: false,
-        message: dateError
-      });
+      validations.push(validateCustomer(customerId));
     }
 
-    const rateError = validateRates(nextTwoDigitRate, nextThreeDigitRate);
+    if (req.body.twoDigitRate !== undefined) {
+      validations.push(
+        resolveActiveRate(req.body.twoDigitRate, "2D rate").then((rate) => {
+          twoDigitRate = rate.number;
 
-    if (rateError) {
-      return res.status(400).json({
-        success: false,
-        message: rateError
-      });
+          return rate;
+        }),
+      );
     }
 
-    const rowError = validateRows(nextRows);
+    if (req.body.threeDigitRate !== undefined) {
+      validations.push(
+        resolveActiveRate(req.body.threeDigitRate, "3D rate").then((rate) => {
+          threeDigitRate = rate.number;
 
-    if (rowError) {
-      return res.status(400).json({
-        success: false,
-        message: rowError
-      });
+          return rate;
+        }),
+      );
     }
 
-    lotteryPlay.set({
-      [PLAY_CATEGORY_FIELD]: nextCategoryId,
-      [PLAY_PRODUCT_FIELD]: nextProductId,
-      [PLAY_CUSTOMER_FIELD]: nextCustomerId,
-      playDate: new Date(nextPlayDate),
-      title: nextTitle.trim(),
-      twoDigitRate: Number(nextTwoDigitRate),
-      threeDigitRate: Number(nextThreeDigitRate),
-      rows: normalizeRows(nextRows),
-      status:
-        req.body.status !== undefined
-          ? req.body.status !== false
-          : lotteryPlay.status,
-      updatedBy: getUserLabel(req)
-    });
+    await Promise.all(validations);
 
-    await lotteryPlay.save();
+    /*
+      |--------------------------------------------------------------------------
+      | Apply category update
+      |--------------------------------------------------------------------------
+      */
 
-    const populatedPlay = await applyPlayPopulate(
-      LotteryPlay.findById(lotteryPlay._id)
-    );
+    if (categoryInput.provided) {
+      lotteryPlay.categoryIds = categoryInput.categoryIds;
 
-    return res.status(200).json({
-      success: true,
-      message: 'Play updated successfully',
-      data: populatedPlay
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const updateLotteryPlayCheckedStatus = async (req, res, next) => {
-  try {
-    const { checkedStatus } = req.body;
-
-    if (typeof checkedStatus !== 'boolean') {
-      return res.status(400).json({
-        success: false,
-        message: 'Checked status must be boolean'
-      });
+      lotteryPlay.categoryId = categoryInput.categoryIds[0];
     }
 
-    const lotteryPlay = await LotteryPlay.findById(req.params.id);
+    /*
+      |--------------------------------------------------------------------------
+      | Apply product update
+      |--------------------------------------------------------------------------
+      */
 
-    if (!lotteryPlay) {
-      return res.status(404).json({
-        success: false,
-        message: 'Play not found'
-      });
+    if (productInput.provided) {
+      lotteryPlay.productIds = productInput.productIds;
+
+      lotteryPlay.productId = productInput.productIds[0];
     }
 
-    lotteryPlay.checkedStatus = checkedStatus;
-    lotteryPlay.updatedBy = getUserLabel(req);
+    /*
+      |--------------------------------------------------------------------------
+      | Apply basic field updates
+      |--------------------------------------------------------------------------
+      */
 
-    await lotteryPlay.save();
+    if (req.body.title !== undefined) {
+      const title = String(req.body.title).trim();
 
-    const populatedPlay = await applyPlayPopulate(
-      LotteryPlay.findById(lotteryPlay._id)
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: 'Checked status updated successfully',
-      data: populatedPlay
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-export const deleteLotteryPlay = async (req, res, next) => {
-  try {
-    const lotteryPlay = await LotteryPlay.findById(req.params.id);
-
-    if (!lotteryPlay) {
-      return res.status(404).json({
-        success: false,
-        message: 'Play not found'
-      });
-    }
-
-    await LotteryPlay.findByIdAndDelete(req.params.id);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Play deleted successfully',
-      data: {
-        deletedPlay: lotteryPlay.title
+      if (!title) {
+        throw createHttpError("Invoice name is required", 400);
       }
+
+      lotteryPlay.title = title;
+    }
+
+    if (customerId) {
+      lotteryPlay.customerId = customerId;
+    }
+
+    if (req.body.playDate !== undefined) {
+      lotteryPlay.playDate = normalizeRequiredDate(
+        req.body.playDate,
+        "Invoice date",
+      );
+    }
+
+    if (req.body.rows !== undefined) {
+      lotteryPlay.rows = normalizeRows(req.body.rows);
+    }
+
+    if (twoDigitRate !== null) {
+      lotteryPlay.twoDigitRate = twoDigitRate;
+    }
+
+    if (threeDigitRate !== null) {
+      lotteryPlay.threeDigitRate = threeDigitRate;
+    }
+
+    const status = parseBooleanValue(req.body.status);
+
+    if (status !== undefined) {
+      lotteryPlay.status = status;
+    }
+
+    /*
+     * Editing the invoice resets its checked status.
+     */
+    lotteryPlay.checkedStatus = false;
+
+    lotteryPlay.updatedBy = getActorName(req);
+
+    await lotteryPlay.save();
+
+    const populatedPlay = await populateLotteryPlay(
+      LotteryPlay.findById(lotteryPlay._id),
+    ).lean();
+
+    return res.status(200).json({
+      success: true,
+
+      message: "Invoice updated successfully",
+
+      data: normalizePopulatedPlay(populatedPlay),
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not update invoice");
   }
+};
+
+/*
+|--------------------------------------------------------------------------
+| PATCH /api/lottery-plays/:id/checked-status
+|--------------------------------------------------------------------------
+*/
+
+const updateLotteryPlayCheckedStatus = async (req, res) => {
+  try {
+    const playId = validateObjectId(req.params.id, "Invoice ID");
+
+    if (typeof req.body.checkedStatus !== "boolean") {
+      throw createHttpError("checkedStatus must be true or false", 400);
+    }
+
+    const updatedLotteryPlay = await populateLotteryPlay(
+      LotteryPlay.findByIdAndUpdate(
+        playId,
+
+        {
+          $set: {
+            checkedStatus: req.body.checkedStatus,
+
+            updatedBy: getActorName(req),
+          },
+        },
+
+        {
+          new: true,
+          runValidators: true,
+        },
+      ),
+    ).lean();
+
+    if (!updatedLotteryPlay) {
+      throw createHttpError("Invoice not found", 404);
+    }
+
+    return res.status(200).json({
+      success: true,
+
+      message: "Invoice checked status updated successfully",
+
+      data: normalizePopulatedPlay(updatedLotteryPlay),
+    });
+  } catch (error) {
+    return handleControllerError(
+      error,
+      res,
+      "Could not update invoice checked status",
+    );
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| DELETE /api/lottery-plays/:id
+|--------------------------------------------------------------------------
+*/
+
+const deleteLotteryPlay = async (req, res) => {
+  try {
+    const playId = validateObjectId(req.params.id, "Invoice ID");
+
+    const lotteryPlay = await LotteryPlay.findById(playId);
+
+    if (!lotteryPlay) {
+      throw createHttpError("Invoice not found", 404);
+    }
+
+    await lotteryPlay.deleteOne();
+
+    return res.status(200).json({
+      success: true,
+
+      message: "Invoice deleted successfully",
+
+      data: {
+        id: lotteryPlay._id.toString(),
+
+        title: lotteryPlay.title,
+      },
+    });
+  } catch (error) {
+    return handleControllerError(error, res, "Could not delete invoice");
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| Exports
+|--------------------------------------------------------------------------
+*/
+
+export {
+  getLotteryPlays,
+  getLotteryPlays as getAllLotteryPlays,
+  getLotteryPlayById,
+  createLotteryPlay,
+  updateLotteryPlay,
+  updateLotteryPlayCheckedStatus,
+  deleteLotteryPlay,
 };

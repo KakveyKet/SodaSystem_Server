@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "seed:admin": "node src/seeders/seedAdmin.js"
   },
   "dependencies": {
     "bcryptjs": "latest",

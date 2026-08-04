@@ -1,572 +1,649 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
-import User from '../models/User.js';
+import User from "../models/User.js";
 
-const ALLOWED_ROLES = ['user', 'admin'];
+const MAX_PAGE_LIMIT = 100;
 
-const escapeRegex = (value = '') => {
-  return value.replace(
-    /[.*+?^${}()|[\]\\]/g,
-    '\\$&'
-  );
+/*
+|--------------------------------------------------------------------------
+| Error helpers
+|--------------------------------------------------------------------------
+*/
+
+const createHttpError = (message, statusCode = 400) => {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+
+  return error;
 };
 
-const normalizeEmail = (email = '') => {
-  return String(email)
+const handleControllerError = (error, res, fallbackMessage) => {
+  console.error(`${fallbackMessage}:`, error);
+
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      success: false,
+      message: error.message,
+    });
+  }
+
+  if (error.name === "ValidationError") {
+    const validationMessage = Object.values(error.errors || {})[0]?.message;
+
+    return res.status(400).json({
+      success: false,
+      message: validationMessage || "User validation failed",
+    });
+  }
+
+  if (error.name === "CastError") {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid user ID",
+    });
+  }
+
+  if (error.code === 11000) {
+    const duplicateField = Object.keys(
+      error.keyPattern || error.keyValue || {},
+    )[0];
+
+    if (duplicateField === "username") {
+      return res.status(409).json({
+        success: false,
+        message: "Username is already taken",
+      });
+    }
+
+    if (duplicateField === "email") {
+      return res.status(409).json({
+        success: false,
+        message: "Email is already registered",
+      });
+    }
+
+    return res.status(409).json({
+      success: false,
+      message: "A user with this information already exists",
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: fallbackMessage,
+  });
+};
+
+/*
+|--------------------------------------------------------------------------
+| General helpers
+|--------------------------------------------------------------------------
+*/
+
+const escapeRegex = (value = "") => {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+const parsePositiveInteger = (value, fallback) => {
+  const parsedValue = Number.parseInt(value, 10);
+
+  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+    return fallback;
+  }
+
+  return parsedValue;
+};
+
+const parseBooleanValue = (value) => {
+  if (value === true || value === "true") {
+    return true;
+  }
+
+  if (value === false || value === "false") {
+    return false;
+  }
+
+  return undefined;
+};
+
+const validateObjectId = (value, fieldName = "User ID") => {
+  if (!value || !mongoose.isValidObjectId(value)) {
+    throw createHttpError(`${fieldName} is invalid`, 400);
+  }
+
+  return String(value);
+};
+
+const normalizeName = (value) => {
+  return String(value ?? "").trim();
+};
+
+const normalizeUsername = (value) => {
+  return String(value ?? "")
     .trim()
     .toLowerCase();
 };
 
-const getCurrentUserId = (req) => {
-  return (
-    req.user?.id ||
-    req.user?._id ||
-    null
-  );
+const normalizeEmail = (value) => {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase();
 };
 
-const isValidObjectId = (value) => {
-  return mongoose.Types.ObjectId.isValid(value);
-};
+const validateName = (value) => {
+  const name = normalizeName(value);
 
-const getSafeUser = async (userId) => {
-  return User.findById(userId).select(
-    'name email role createdAt updatedAt'
-  );
-};
-
-/*
-|--------------------------------------------------------------------------
-| Current logged-in user
-|--------------------------------------------------------------------------
-| GET /api/users/me
-*/
-export const getMe = async (
-  req,
-  res,
-  next
-) => {
-  try {
-    const userId = getCurrentUserId(req);
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: 'Authentication is required'
-      });
-    }
-
-    const user = await getSafeUser(userId);
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      user
-    });
-  } catch (error) {
-    next(error);
+  if (!name) {
+    throw createHttpError("Name is required", 400);
   }
+
+  return name;
+};
+
+const validateUsername = (value) => {
+  const username = normalizeUsername(value);
+
+  if (!username) {
+    throw createHttpError("Username is required", 400);
+  }
+
+  if (username.length < 3) {
+    throw createHttpError("Username must be at least 3 characters", 400);
+  }
+
+  if (username.length > 30) {
+    throw createHttpError("Username cannot be longer than 30 characters", 400);
+  }
+
+  const usernamePattern = /^[a-z0-9._-]+$/;
+
+  if (!usernamePattern.test(username)) {
+    throw createHttpError(
+      "Username can only contain letters, numbers, dots, underscores, and hyphens",
+      400,
+    );
+  }
+
+  return username;
+};
+
+const validateEmail = (value) => {
+  const email = normalizeEmail(value);
+
+  if (!email) {
+    throw createHttpError("Email is required", 400);
+  }
+
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if (!emailPattern.test(email)) {
+    throw createHttpError("Please provide a valid email address", 400);
+  }
+
+  return email;
+};
+
+const validatePassword = (value, required = false) => {
+  const password = String(value ?? "");
+
+  if (!password) {
+    if (required) {
+      throw createHttpError("Password is required", 400);
+    }
+
+    return null;
+  }
+
+  if (password.length < 6) {
+    throw createHttpError("Password must be at least 6 characters", 400);
+  }
+
+  return password;
+};
+
+const validateRole = (value) => {
+  const role = String(value ?? "user")
+    .trim()
+    .toLowerCase();
+
+  if (!["user", "admin"].includes(role)) {
+    throw createHttpError("Role must be user or admin", 400);
+  }
+
+  return role;
+};
+
+const getAuthenticatedUserId = (req) => {
+  return String(req.user?._id || req.user?.id || req.user?.userId || "");
 };
 
 /*
 |--------------------------------------------------------------------------
-| Get all users
+| Response formatter
+|--------------------------------------------------------------------------
+*/
+
+const formatUser = (user) => {
+  if (!user) {
+    return null;
+  }
+
+  const source = typeof user.toObject === "function" ? user.toObject() : user;
+
+  const userId = source._id || source.id;
+
+  return {
+    id: userId ? String(userId) : null,
+
+    _id: userId ? String(userId) : null,
+
+    name: source.name || "",
+
+    username: source.username || "",
+
+    email: source.email || "",
+
+    role: source.role || "user",
+
+    status: source.status !== false,
+
+    createdAt: source.createdAt || null,
+
+    updatedAt: source.updatedAt || null,
+  };
+};
+
+/*
+|--------------------------------------------------------------------------
+| Duplicate validation
+|--------------------------------------------------------------------------
+*/
+
+const ensureUniqueUserFields = async ({
+  username,
+  email,
+  excludeUserId = null,
+}) => {
+  const conditions = [];
+
+  if (username) {
+    conditions.push({
+      username,
+    });
+  }
+
+  if (email) {
+    conditions.push({
+      email,
+    });
+  }
+
+  if (!conditions.length) {
+    return;
+  }
+
+  const filter = {
+    $or: conditions,
+  };
+
+  if (excludeUserId) {
+    filter._id = {
+      $ne: excludeUserId,
+    };
+  }
+
+  const existingUser = await User.findOne(filter)
+    .select("_id username email")
+    .lean();
+
+  if (!existingUser) {
+    return;
+  }
+
+  if (username && existingUser.username === username) {
+    throw createHttpError("Username is already taken", 409);
+  }
+
+  if (email && existingUser.email === email) {
+    throw createHttpError("Email is already registered", 409);
+  }
+
+  throw createHttpError("A user with this information already exists", 409);
+};
+
+/*
 |--------------------------------------------------------------------------
 | GET /api/users
-| Admin only
+|--------------------------------------------------------------------------
 */
-export const getUsers = async (
-  req,
-  res,
-  next
-) => {
+
+const getUsers = async (req, res) => {
   try {
-    const page = Math.max(
-      Number.parseInt(req.query.page, 10) || 1,
-      1
-    );
+    const page = parsePositiveInteger(req.query.page, 1);
 
     const limit = Math.min(
-      Math.max(
-        Number.parseInt(req.query.limit, 10) || 10,
-        1
-      ),
-      100
+      parsePositiveInteger(req.query.limit, 10),
+      MAX_PAGE_LIMIT,
     );
 
     const skip = (page - 1) * limit;
 
     const filter = {};
 
-    if (req.query.search?.trim()) {
-      const searchValue = escapeRegex(
-        req.query.search.trim()
-      );
+    const search = String(req.query.search ?? "").trim();
+
+    if (search) {
+      const safeSearch = escapeRegex(search);
 
       filter.$or = [
         {
+          username: {
+            $regex: safeSearch,
+            $options: "i",
+          },
+        },
+        {
           name: {
-            $regex: searchValue,
-            $options: 'i'
-          }
+            $regex: safeSearch,
+            $options: "i",
+          },
         },
         {
           email: {
-            $regex: searchValue,
-            $options: 'i'
-          }
-        }
+            $regex: safeSearch,
+            $options: "i",
+          },
+        },
       ];
     }
 
-    if (
-      req.query.role &&
-      ALLOWED_ROLES.includes(req.query.role)
-    ) {
-      filter.role = req.query.role;
+    if (req.query.role) {
+      const role = validateRole(req.query.role);
+
+      filter.role = role;
     }
 
-    const [users, total] = await Promise.all([
+    const status = parseBooleanValue(req.query.status);
+
+    if (status !== undefined) {
+      filter.status = status;
+    }
+
+    const [userDocuments, total] = await Promise.all([
       User.find(filter)
-        .select(
-          'name email role createdAt updatedAt'
-        )
+        .select("_id name username email role status createdAt updatedAt")
         .sort({
-          createdAt: -1
+          createdAt: -1,
+          _id: -1,
         })
         .skip(skip)
-        .limit(limit),
+        .limit(limit)
+        .lean(),
 
-      User.countDocuments(filter)
+      User.countDocuments(filter),
     ]);
+
+    const users = userDocuments.map(formatUser);
+
+    const pages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({
       success: true,
+
       data: users,
+
       pagination: {
         page,
         limit,
         total,
-        totalPages: Math.ceil(total / limit)
-      }
+        pages,
+      },
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not fetch users");
   }
 };
 
 /*
 |--------------------------------------------------------------------------
-| Get one user
+| GET /api/users/me
 |--------------------------------------------------------------------------
-| GET /api/users/:id
-| Admin only
 */
-export const getUserById = async (
-  req,
-  res,
-  next
-) => {
+
+const getCurrentUser = async (req, res) => {
   try {
-    const { id } = req.params;
+    const authenticatedUserId = getAuthenticatedUserId(req);
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid user ID'
-      });
-    }
+    const userId = validateObjectId(
+      authenticatedUserId,
+      "Authenticated user ID",
+    );
 
-    const user = await getSafeUser(id);
+    const user = await User.findById(userId)
+      .select("_id name username email role status createdAt updatedAt")
+      .lean();
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      throw createHttpError("User not found", 404);
     }
 
     return res.status(200).json({
       success: true,
-      data: user
+      data: formatUser(user),
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not fetch user profile");
   }
 };
 
 /*
 |--------------------------------------------------------------------------
-| Create user
+| GET /api/users/:id
+|--------------------------------------------------------------------------
+*/
+
+const getUserById = async (req, res) => {
+  try {
+    const userId = validateObjectId(req.params.id);
+
+    const user = await User.findById(userId)
+      .select("_id name username email role status createdAt updatedAt")
+      .lean();
+
+    if (!user) {
+      throw createHttpError("User not found", 404);
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: formatUser(user),
+    });
+  } catch (error) {
+    return handleControllerError(error, res, "Could not fetch user");
+  }
+};
+
+/*
 |--------------------------------------------------------------------------
 | POST /api/users
-| Admin only
+|--------------------------------------------------------------------------
 */
-export const createUser = async (
-  req,
-  res,
-  next
-) => {
+
+const createUser = async (req, res) => {
   try {
-    const {
-      name,
+    const name = validateName(req.body.name);
+
+    const username = validateUsername(req.body.username);
+
+    const email = validateEmail(req.body.email);
+
+    const password = validatePassword(req.body.password, true);
+
+    const role = validateRole(req.body.role);
+
+    const parsedStatus = parseBooleanValue(req.body.status);
+
+    await ensureUniqueUserFields({
+      username,
       email,
-      password,
-      role = 'user'
-    } = req.body;
-
-    if (!name?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name is required'
-      });
-    }
-
-    if (!email?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email is required'
-      });
-    }
-
-    if (!password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Password is required'
-      });
-    }
-
-    if (String(password).length < 6) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Password must be at least 6 characters'
-      });
-    }
-
-    if (!ALLOWED_ROLES.includes(role)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Role must be either user or admin'
-      });
-    }
-
-    const normalizedEmail =
-      normalizeEmail(email);
-
-    const existingUser = await User.findOne({
-      email: normalizedEmail
     });
-
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message:
-          'Email is already registered'
-      });
-    }
 
     const user = await User.create({
-      name: name.trim(),
-      email: normalizedEmail,
+      name,
+      username,
+      email,
       password,
-      role
-    });
+      role,
 
-    const safeUser = await getSafeUser(
-      user._id
-    );
+      status: parsedStatus !== undefined ? parsedStatus : true,
+    });
 
     return res.status(201).json({
       success: true,
-      message: 'User created successfully',
-      data: safeUser
+
+      message: "User created successfully",
+
+      data: formatUser(user),
     });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message:
-          'Email is already registered'
-      });
-    }
-
-    next(error);
+    return handleControllerError(error, res, "Could not create user");
   }
 };
 
 /*
 |--------------------------------------------------------------------------
-| Update user
-|--------------------------------------------------------------------------
 | PUT /api/users/:id
-| Admin only
+|--------------------------------------------------------------------------
 */
-export const updateUser = async (
-  req,
-  res,
-  next
-) => {
+
+const updateUser = async (req, res) => {
   try {
-    const { id } = req.params;
+    const userId = validateObjectId(req.params.id);
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid user ID'
-      });
-    }
-
-    /*
-      Password is select:false in the model, so use
-      select('+password') when updating it.
-    */
-    const user = await User.findById(id)
-      .select('+password');
+    const user = await User.findById(userId).select("+password");
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
+      throw createHttpError("User not found", 404);
     }
 
-    const {
-      name,
-      email,
-      password,
-      role
-    } = req.body;
+    let updatedUsername = null;
+    let updatedEmail = null;
 
-    if (
-      name !== undefined &&
-      !String(name).trim()
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Name cannot be empty'
-      });
+    if (req.body.name !== undefined) {
+      user.name = validateName(req.body.name);
     }
 
-    if (
-      email !== undefined &&
-      !String(email).trim()
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email cannot be empty'
-      });
+    if (req.body.username !== undefined) {
+      updatedUsername = validateUsername(req.body.username);
     }
 
-    if (
-      password &&
-      String(password).length < 6
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Password must be at least 6 characters'
-      });
+    if (req.body.email !== undefined) {
+      updatedEmail = validateEmail(req.body.email);
+    }
+
+    await ensureUniqueUserFields({
+      username: updatedUsername,
+      email: updatedEmail,
+      excludeUserId: user._id,
+    });
+
+    if (updatedUsername) {
+      user.username = updatedUsername;
+    }
+
+    if (updatedEmail) {
+      user.email = updatedEmail;
     }
 
     if (
-      role !== undefined &&
-      !ALLOWED_ROLES.includes(role)
+      req.body.password !== undefined &&
+      String(req.body.password).length > 0
     ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'Role must be either user or admin'
-      });
+      user.password = validatePassword(req.body.password, false);
     }
 
-    const currentUserId =
-      getCurrentUserId(req);
+    if (req.body.role !== undefined) {
+      user.role = validateRole(req.body.role);
+    }
 
-    /*
-      Prevent the logged-in administrator from
-      removing their own administrator role.
-    */
-    if (
-      currentUserId &&
-      String(currentUserId) === String(user._id) &&
-      role !== undefined &&
-      role !== 'admin'
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'You cannot remove your own administrator role'
-      });
+    const parsedStatus = parseBooleanValue(req.body.status);
+
+    if (parsedStatus !== undefined) {
+      user.status = parsedStatus;
     }
 
     /*
-      Protect the final administrator account.
-    */
-    if (
-      user.role === 'admin' &&
-      role === 'user'
-    ) {
-      const adminCount =
-        await User.countDocuments({
-          role: 'admin'
-        });
-
-      if (adminCount <= 1) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'The last administrator cannot be changed to user'
-        });
-      }
-    }
-
-    if (email !== undefined) {
-      const normalizedEmail =
-        normalizeEmail(email);
-
-      const duplicateUser =
-        await User.findOne({
-          email: normalizedEmail,
-          _id: {
-            $ne: user._id
-          }
-        });
-
-      if (duplicateUser) {
-        return res.status(409).json({
-          success: false,
-          message:
-            'Email is already registered'
-        });
-      }
-
-      user.email = normalizedEmail;
-    }
-
-    if (name !== undefined) {
-      user.name = String(name).trim();
-    }
-
-    if (role !== undefined) {
-      user.role = role;
-    }
-
-    /*
-      Leave the password unchanged when the
-      frontend sends an empty password.
-    */
-    if (password) {
-      user.password = password;
-    }
-
-    /*
-      The pre-save hook hashes a changed password.
-    */
+     * save() is required so the User model pre-save
+     * middleware hashes a newly supplied password.
+     */
     await user.save();
-
-    const safeUser = await getSafeUser(
-      user._id
-    );
 
     return res.status(200).json({
       success: true,
-      message: 'User updated successfully',
-      data: safeUser
+
+      message: "User updated successfully",
+
+      data: formatUser(user),
     });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message:
-          'Email is already registered'
-      });
-    }
-
-    next(error);
+    return handleControllerError(error, res, "Could not update user");
   }
 };
 
 /*
 |--------------------------------------------------------------------------
-| Delete user
-|--------------------------------------------------------------------------
 | DELETE /api/users/:id
-| Admin only
+|--------------------------------------------------------------------------
 */
-export const deleteUser = async (
-  req,
-  res,
-  next
-) => {
-  try {
-    const { id } = req.params;
 
-    if (!isValidObjectId(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid user ID'
-      });
+const deleteUser = async (req, res) => {
+  try {
+    const userId = validateObjectId(req.params.id);
+
+    const authenticatedUserId = getAuthenticatedUserId(req);
+
+    if (authenticatedUserId && String(authenticatedUserId) === String(userId)) {
+      throw createHttpError("You cannot delete your own account", 400);
     }
 
-    const user = await User.findById(id);
+    const user = await User.findById(userId);
 
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    const currentUserId =
-      getCurrentUserId(req);
-
-    if (
-      currentUserId &&
-      String(currentUserId) ===
-        String(user._id)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          'You cannot delete your own account'
-      });
-    }
-
-    if (user.role === 'admin') {
-      const adminCount =
-        await User.countDocuments({
-          role: 'admin'
-        });
-
-      if (adminCount <= 1) {
-        return res.status(400).json({
-          success: false,
-          message:
-            'The last administrator cannot be deleted'
-        });
-      }
+      throw createHttpError("User not found", 404);
     }
 
     await user.deleteOne();
 
     return res.status(200).json({
       success: true,
-      message: 'User deleted successfully',
+
+      message: "User deleted successfully",
+
       data: {
-        id: user._id,
-        name: user.name,
-        email: user.email
-      }
+        id: user._id.toString(),
+
+        username: user.username,
+
+        email: user.email,
+      },
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not delete user");
   }
+};
+
+/*
+|--------------------------------------------------------------------------
+| Exports
+|--------------------------------------------------------------------------
+*/
+
+export {
+  getUsers,
+  getCurrentUser,
+  getCurrentUser as getMe,
+  getUserById,
+  createUser,
+  updateUser,
+  deleteUser,
 };

@@ -1,367 +1,545 @@
-import Category from '../models/Category.js';
-import Product from '../models/Product.js';
-import LotteryPlay from '../models/LotteryPlay.js';
+import mongoose from "mongoose";
 
-const PRODUCT_CATEGORY_FIELD = Product.schema.path('categoryId')
-  ? 'categoryId'
-  : 'category';
+import Product from "../models/Product.js";
 
-const parseBoolean = (value) => {
-  if (value === undefined || value === null || value === '') {
-    return null;
+const MAX_PAGE_LIMIT = 500;
+
+/*
+|--------------------------------------------------------------------------
+| Error helpers
+|--------------------------------------------------------------------------
+*/
+
+const createHttpError = (message, statusCode = 400) => {
+  const error = new Error(message);
+
+  error.statusCode = statusCode;
+
+  return error;
+};
+
+const handleControllerError = (error, res, fallbackMessage) => {
+  console.error(`${fallbackMessage}:`, error);
+
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      success: false,
+      message: error.message,
+    });
   }
 
-  if (value === true || value === 'true') {
+  if (error.name === "ValidationError") {
+    const validationMessage = Object.values(error.errors || {})[0]?.message;
+
+    return res.status(400).json({
+      success: false,
+      message: validationMessage || "Product validation failed",
+    });
+  }
+
+  if (error.name === "CastError") {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid product ID",
+    });
+  }
+
+  if (error.code === 11000) {
+    return res.status(409).json({
+      success: false,
+      message: "A product with this name already exists",
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: fallbackMessage,
+  });
+};
+
+/*
+|--------------------------------------------------------------------------
+| General helpers
+|--------------------------------------------------------------------------
+*/
+
+const hasOwn = (object, property) => {
+  return Object.prototype.hasOwnProperty.call(object, property);
+};
+
+const escapeRegex = (value = "") => {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+const parsePositiveInteger = (value, fallback) => {
+  const parsedValue = Number.parseInt(value, 10);
+
+  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+    return fallback;
+  }
+
+  return parsedValue;
+};
+
+const parseBooleanValue = (value) => {
+  if (value === true || value === "true" || value === 1 || value === "1") {
     return true;
   }
 
-  if (value === false || value === 'false') {
+  if (value === false || value === "false" || value === 0 || value === "0") {
     return false;
   }
 
-  return null;
+  return undefined;
 };
 
-const escapeRegex = (value = '') => {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const validateObjectId = (value, fieldName = "Product ID") => {
+  if (!value || !mongoose.isValidObjectId(value)) {
+    throw createHttpError(`${fieldName} is invalid`, 400);
+  }
+
+  return String(value);
 };
 
-const getUserLabel = (req) => {
-  return req.user?.name || req.user?.email || 'System';
+const getActorId = (req) => {
+  const actorId = req.user?._id || req.user?.id || req.user?.userId || null;
+
+  if (!actorId || !mongoose.isValidObjectId(actorId)) {
+    return null;
+  }
+
+  return String(actorId);
 };
 
-const buildProductCategoryFilter = (categoryId) => {
-  return {
-    $or: [
-      {
-        categoryId
-      },
-      {
-        category: categoryId
-      }
-    ]
+/*
+|--------------------------------------------------------------------------
+| Field normalization
+|--------------------------------------------------------------------------
+*/
+
+const normalizeProductName = (value) => {
+  const name = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!name) {
+    throw createHttpError("Product name is required", 400);
+  }
+
+  if (name.length > 150) {
+    throw createHttpError("Product name cannot exceed 150 characters", 400);
+  }
+
+  return name;
+};
+
+const normalizeWinMultiplier = (value) => {
+  if (value === null || value === undefined || value === "") {
+    throw createHttpError("Product multiplier is required", 400);
+  }
+
+  const winMultiplier = Number(value);
+
+  if (!Number.isFinite(winMultiplier)) {
+    throw createHttpError("Product multiplier must be a valid number", 400);
+  }
+
+  if (winMultiplier < 0) {
+    throw createHttpError("Product multiplier cannot be negative", 400);
+  }
+
+  return winMultiplier;
+};
+
+const normalizeDescription = (value) => {
+  const description = String(value ?? "").trim();
+
+  if (description.length > 1000) {
+    throw createHttpError("Description cannot exceed 1000 characters", 400);
+  }
+
+  return description;
+};
+
+const normalizeStatus = (value) => {
+  const status = parseBooleanValue(value);
+
+  if (status === undefined) {
+    throw createHttpError("Status must be true or false", 400);
+  }
+
+  return status;
+};
+
+const createExactNameRegex = (name) => {
+  return new RegExp(`^${escapeRegex(name)}$`, "i");
+};
+
+/*
+|--------------------------------------------------------------------------
+| Duplicate product helper
+|--------------------------------------------------------------------------
+*/
+
+const findDuplicateProduct = async (name, excludedProductId = null) => {
+  const filter = {
+    name: {
+      $regex: createExactNameRegex(name),
+    },
   };
-};
 
-const buildProductPlayFilter = (productId) => {
-  return {
-    $or: [
-      {
-        productId
-      },
-      {
-        product: productId
-      }
-    ]
-  };
-};
-
-const applyProductPopulate = (query) => {
-  if (Product.schema.path('categoryId')) {
-    query.populate('categoryId', 'name status');
+  if (excludedProductId) {
+    filter._id = {
+      $ne: excludedProductId,
+    };
   }
 
-  if (Product.schema.path('category')) {
-    query.populate('category', 'name status');
-  }
-
-  return query;
+  return Product.findOne(filter).select("_id name").lean();
 };
 
-const validateCategoryExists = async (categoryId) => {
-  if (!categoryId) {
-    return 'Category is required';
-  }
+/*
+|--------------------------------------------------------------------------
+| GET /api/products
+|--------------------------------------------------------------------------
+*/
 
-  const category = await Category.findById(categoryId);
-
-  if (!category) {
-    return 'Category does not exist';
-  }
-
-  return '';
-};
-
-export const getProducts = async (req, res, next) => {
+const getProducts = async (req, res) => {
   try {
-    const page = Math.max(Number(req.query.page || 1), 1);
-    const limit = Math.max(Number(req.query.limit || 10), 1);
+    const page = parsePositiveInteger(req.query.page, 1);
+
+    const limit = Math.min(
+      parsePositiveInteger(req.query.limit, 10),
+      MAX_PAGE_LIMIT,
+    );
+
     const skip = (page - 1) * limit;
 
     const filter = {};
 
-    if (req.query.search) {
-      const search = escapeRegex(req.query.search.trim());
+    const search = String(req.query.search ?? "").trim();
+
+    if (search) {
+      const safeSearch = escapeRegex(search);
 
       filter.$or = [
         {
           name: {
-            $regex: search,
-            $options: 'i'
-          }
+            $regex: safeSearch,
+            $options: "i",
+          },
         },
         {
           description: {
-            $regex: search,
-            $options: 'i'
-          }
-        }
+            $regex: safeSearch,
+            $options: "i",
+          },
+        },
       ];
     }
 
-    if (req.query.categoryId) {
-      Object.assign(filter, buildProductCategoryFilter(req.query.categoryId));
-    }
+    if (req.query.status !== undefined) {
+      const status = parseBooleanValue(req.query.status);
 
-    const status = parseBoolean(req.query.status);
+      if (status === undefined) {
+        throw createHttpError("Status filter must be true or false", 400);
+      }
 
-    if (status !== null) {
       filter.status = status;
     }
 
     const [products, total] = await Promise.all([
-      applyProductPopulate(
-        Product.find(filter)
-          .sort({
-            createdAt: -1
-          })
-          .skip(skip)
-          .limit(limit)
-      ),
-      Product.countDocuments(filter)
+      Product.find(filter)
+        .sort({
+          createdAt: -1,
+          _id: -1,
+        })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+
+      Product.countDocuments(filter),
     ]);
+
+    const pages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({
       success: true,
       data: products,
+
       pagination: {
         page,
         limit,
         total,
-        totalPages: Math.ceil(total / limit)
-      }
+        pages,
+      },
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not fetch products");
   }
 };
 
-export const getProductById = async (req, res, next) => {
+/*
+|--------------------------------------------------------------------------
+| GET /api/products/:id
+|--------------------------------------------------------------------------
+*/
+
+const getProductById = async (req, res) => {
   try {
-    const product = await applyProductPopulate(Product.findById(req.params.id));
+    const productId = validateObjectId(req.params.id);
+
+    const product = await Product.findById(productId).lean();
 
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: 'Product not found'
-      });
+      throw createHttpError("Product not found", 404);
     }
 
     return res.status(200).json({
       success: true,
-      data: product
+      data: product,
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not fetch product");
   }
 };
 
-export const createProduct = async (req, res, next) => {
+/*
+|--------------------------------------------------------------------------
+| POST /api/products
+|--------------------------------------------------------------------------
+*/
+
+const createProduct = async (req, res) => {
   try {
-    const { categoryId, category, name, winMultiplier, description, status } = req.body;
+    const name = normalizeProductName(req.body.name);
 
-    const nextCategoryId = categoryId || category;
+    const winMultiplier = normalizeWinMultiplier(req.body.winMultiplier);
 
-    const categoryError = await validateCategoryExists(nextCategoryId);
+    const description = normalizeDescription(req.body.description);
 
-    if (categoryError) {
-      return res.status(400).json({
-        success: false,
-        message: categoryError
-      });
+    let status = true;
+
+    if (hasOwn(req.body, "status")) {
+      status = normalizeStatus(req.body.status);
     }
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Product name is required'
-      });
-    }
-
-    if (winMultiplier === null || winMultiplier === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'Win multiplier is required'
-      });
-    }
-
-    if (Number(winMultiplier) < 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Win multiplier cannot be negative'
-      });
-    }
-
-    const duplicateProduct = await Product.findOne({
-      ...buildProductCategoryFilter(nextCategoryId),
-      name: {
-        $regex: `^${escapeRegex(name.trim())}$`,
-        $options: 'i'
-      }
-    });
+    const duplicateProduct = await findDuplicateProduct(name);
 
     if (duplicateProduct) {
-      return res.status(400).json({
-        success: false,
-        message: 'Product already exists in this category'
-      });
+      throw createHttpError(`Product "${name}" already exists`, 409);
     }
 
-    const product = await Product.create({
-      [PRODUCT_CATEGORY_FIELD]: nextCategoryId,
-      name: name.trim(),
-      winMultiplier: Number(winMultiplier),
-      description: description?.trim() || '',
-      status: status !== false,
-      createdBy: getUserLabel(req),
-      updatedBy: getUserLabel(req)
-    });
+    const actorId = getActorId(req);
 
-    const populatedProduct = await applyProductPopulate(
-      Product.findById(product._id)
-    );
+    const product = await Product.create({
+      name,
+      winMultiplier,
+      description,
+      status,
+
+      createdBy: actorId,
+
+      updatedBy: actorId,
+    });
 
     return res.status(201).json({
       success: true,
-      message: 'Product created successfully',
-      data: populatedProduct
+      message: "Product created successfully",
+      data: product,
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not create product");
   }
 };
 
-export const updateProduct = async (req, res, next) => {
-  try {
-    const { categoryId, category, name, winMultiplier, description, status } = req.body;
+/*
+|--------------------------------------------------------------------------
+| PUT/PATCH /api/products/:id
+|--------------------------------------------------------------------------
+*/
 
-    const product = await Product.findById(req.params.id);
+const updateProduct = async (req, res) => {
+  try {
+    const productId = validateObjectId(req.params.id);
+
+    const product = await Product.findById(productId);
 
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: 'Product not found'
-      });
+      throw createHttpError("Product not found", 404);
     }
 
-    const nextCategoryId =
-      categoryId ||
-      category ||
-      product.categoryId ||
-      product.category;
+    const hasName = hasOwn(req.body, "name");
 
-    const categoryError = await validateCategoryExists(nextCategoryId);
+    const hasWinMultiplier = hasOwn(req.body, "winMultiplier");
 
-    if (categoryError) {
-      return res.status(400).json({
-        success: false,
-        message: categoryError
-      });
+    const hasDescription = hasOwn(req.body, "description");
+
+    const hasStatus = hasOwn(req.body, "status");
+
+    if (!hasName && !hasWinMultiplier && !hasDescription && !hasStatus) {
+      throw createHttpError("No product fields were provided for update", 400);
     }
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Product name is required'
-      });
-    }
+    /*
+    |--------------------------------------------------------------------------
+    | Update name
+    |--------------------------------------------------------------------------
+    */
 
-    if (winMultiplier === null || winMultiplier === undefined) {
-      return res.status(400).json({
-        success: false,
-        message: 'Win multiplier is required'
-      });
-    }
+    if (hasName) {
+      const name = normalizeProductName(req.body.name);
 
-    if (Number(winMultiplier) < 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Win multiplier cannot be negative'
-      });
-    }
+      const duplicateProduct = await findDuplicateProduct(name, productId);
 
-    const duplicateProduct = await Product.findOne({
-      _id: {
-        $ne: product._id
-      },
-      ...buildProductCategoryFilter(nextCategoryId),
-      name: {
-        $regex: `^${escapeRegex(name.trim())}$`,
-        $options: 'i'
+      if (duplicateProduct) {
+        throw createHttpError(`Product "${name}" already exists`, 409);
       }
-    });
 
-    if (duplicateProduct) {
-      return res.status(400).json({
-        success: false,
-        message: 'Product already exists in this category'
-      });
+      product.name = name;
     }
 
-    product[PRODUCT_CATEGORY_FIELD] = nextCategoryId;
-    product.name = name.trim();
-    product.winMultiplier = Number(winMultiplier);
-    product.description = description?.trim() || '';
-    product.status = status !== false;
-    product.updatedBy = getUserLabel(req);
+    /*
+    |--------------------------------------------------------------------------
+    | Update multiplier
+    |--------------------------------------------------------------------------
+    */
+
+    if (hasWinMultiplier) {
+      product.winMultiplier = normalizeWinMultiplier(req.body.winMultiplier);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Update description
+    |--------------------------------------------------------------------------
+    */
+
+    if (hasDescription) {
+      product.description = normalizeDescription(req.body.description);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Update status
+    |--------------------------------------------------------------------------
+    */
+
+    if (hasStatus) {
+      product.status = normalizeStatus(req.body.status);
+    }
+
+    const actorId = getActorId(req);
+
+    if (actorId) {
+      product.updatedBy = actorId;
+    }
 
     await product.save();
 
-    const populatedProduct = await applyProductPopulate(
-      Product.findById(product._id)
-    );
-
     return res.status(200).json({
       success: true,
-      message: 'Product updated successfully',
-      data: populatedProduct
+      message: "Product updated successfully",
+      data: product,
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not update product");
   }
 };
 
-export const deleteProduct = async (req, res, next) => {
-  try {
-    const { id } = req.params;
+/*
+|--------------------------------------------------------------------------
+| PATCH /api/products/:id/status
+|--------------------------------------------------------------------------
+*/
 
-    const product = await Product.findById(id);
+const updateProductStatus = async (req, res) => {
+  try {
+    const productId = validateObjectId(req.params.id);
+
+    if (!hasOwn(req.body, "status")) {
+      throw createHttpError("Status is required", 400);
+    }
+
+    const status = normalizeStatus(req.body.status);
+
+    const product = await Product.findById(productId);
 
     if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: 'Product not found'
-      });
+      throw createHttpError("Product not found", 404);
     }
 
-    const assignedPlayCount = await LotteryPlay.countDocuments(
-      buildProductPlayFilter(id)
-    );
+    product.status = status;
 
-    if (assignedPlayCount > 0) {
-      return res.status(400).json({
-        success: false,
-        message: `Cannot delete product because it is assigned to ${assignedPlayCount} play(s)`
-      });
+    const actorId = getActorId(req);
+
+    if (actorId) {
+      product.updatedBy = actorId;
     }
 
-    await Product.findByIdAndDelete(id);
+    await product.save();
 
     return res.status(200).json({
       success: true,
-      message: 'Product deleted successfully'
+
+      message: status
+        ? "Product activated successfully"
+        : "Product deactivated successfully",
+
+      data: product,
     });
   } catch (error) {
-    next(error);
+    return handleControllerError(error, res, "Could not update product status");
   }
+};
+
+/*
+|--------------------------------------------------------------------------
+| DELETE /api/products/:id
+|--------------------------------------------------------------------------
+*/
+
+const deleteProduct = async (req, res) => {
+  try {
+    const productId = validateObjectId(req.params.id);
+
+    const product = await Product.findById(productId);
+
+    if (!product) {
+      throw createHttpError("Product not found", 404);
+    }
+
+    const deletedProduct = {
+      id: product._id.toString(),
+
+      name: product.name,
+
+      winMultiplier: product.winMultiplier,
+    };
+
+    await product.deleteOne();
+
+    return res.status(200).json({
+      success: true,
+      message: "Product deleted successfully",
+      data: deletedProduct,
+    });
+  } catch (error) {
+    return handleControllerError(error, res, "Could not delete product");
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| Exports
+|--------------------------------------------------------------------------
+*/
+
+export {
+  getProducts,
+  getProducts as getAllProducts,
+  getProductById,
+  createProduct,
+  updateProduct,
+  updateProductStatus,
+  deleteProduct,
 };
