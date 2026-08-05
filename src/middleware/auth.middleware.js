@@ -2,134 +2,193 @@ import jwt from "jsonwebtoken";
 
 import User from "../models/User.js";
 
-const readBearerToken = (req) => {
-  const authorization = req.headers.authorization || "";
+/*
+|--------------------------------------------------------------------------
+| Extract bearer token
+|--------------------------------------------------------------------------
+*/
 
-  if (!authorization.startsWith("Bearer ")) {
+const getBearerToken = (
+  req,
+) => {
+  const authorization =
+    req.headers.authorization;
+
+  if (
+    !authorization ||
+    !authorization.startsWith(
+      "Bearer ",
+    )
+  ) {
     return null;
   }
 
-  return authorization.slice(7).trim();
-};
-
-const protect = async (req, res, next) => {
-  try {
-    const token = readBearerToken(req);
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: "Authentication token is required",
-      });
-    }
-
-    if (!process.env.JWT_SECRET) {
-      return res.status(500).json({
-        success: false,
-        message: "JWT_SECRET is not configured",
-      });
-    }
-
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const userId = decoded.userId || decoded.id || decoded._id;
-
-    if (!userId) {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid authentication token",
-      });
-    }
-
-    const user = await User.findById(userId);
-
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "The account for this token no longer exists",
-      });
-    }
-
-    if (user.status === false) {
-      return res.status(403).json({
-        success: false,
-        message: "Your account is inactive",
-      });
-    }
-
-    req.user = user;
-    return next();
-  } catch (error) {
-    if (error.name === "TokenExpiredError") {
-      return res.status(401).json({
-        success: false,
-        message: "Authentication token has expired",
-      });
-    }
-
-    if (error.name === "JsonWebTokenError") {
-      return res.status(401).json({
-        success: false,
-        message: "Invalid authentication token",
-      });
-    }
-
-    console.error("Authentication middleware error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Could not authenticate the request",
-    });
-  }
+  return authorization
+    .slice(7)
+    .trim();
 };
 
 /*
- * Strict role rules:
- *
- * authorizeRoles("admin")    => admin only
- * authorizeRoles("user")     => admin and user
- * authorizeRoles("customer") => admin and customer
- *
- * A customer is NOT automatically treated as a normal user.
- */
-const roleCanAccess = (currentRole, allowedRoles) => {
-  if (currentRole === "admin") {
-    return true;
-  }
+|--------------------------------------------------------------------------
+| Protect route
+|--------------------------------------------------------------------------
+*/
 
-  return allowedRoles.includes(currentRole);
-};
+const protect =
+  async (
+    req,
+    res,
+    next,
+  ) => {
+    try {
+      const token =
+        getBearerToken(req);
+
+      if (!token) {
+        return res
+          .status(401)
+          .json({
+            success: false,
+            message:
+              "Authentication token is required",
+          });
+      }
+
+      const jwtSecret =
+        process.env.JWT_SECRET;
+
+      if (!jwtSecret) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+            message:
+              "JWT_SECRET is missing from the server environment",
+          });
+      }
+
+      const decoded =
+        jwt.verify(
+          token,
+          jwtSecret,
+        );
+
+      const userId =
+        decoded.id ||
+        decoded.userId ||
+        decoded._id;
+
+      const user =
+        await User.findById(
+          userId,
+        ).select(
+          "_id name username email role status lastLoginAt createdAt updatedAt",
+        );
+
+      if (!user) {
+        return res
+          .status(401)
+          .json({
+            success: false,
+            message:
+              "Account no longer exists",
+          });
+      }
+
+      if (
+        user.status ===
+        false
+      ) {
+        return res
+          .status(403)
+          .json({
+            success: false,
+            message:
+              "This account is inactive",
+          });
+      }
+
+      req.user =
+        user;
+
+      return next();
+    } catch (error) {
+      console.error(
+        "Authentication error:",
+        error,
+      );
+
+      if (
+        error.name ===
+        "TokenExpiredError"
+      ) {
+        return res
+          .status(401)
+          .json({
+            success: false,
+            message:
+              "Authentication token has expired",
+          });
+      }
+
+      return res
+        .status(401)
+        .json({
+          success: false,
+          message:
+            "Invalid authentication token",
+        });
+    }
+  };
+
+/*
+|--------------------------------------------------------------------------
+| Strict role authorization
+|--------------------------------------------------------------------------
+|
+| Only the listed roles are allowed.
+|
+| Admin does not automatically inherit customer-only endpoints unless
+| "admin" is explicitly included.
+|
+*/
 
 const authorizeRoles =
   (...allowedRoles) =>
-  (req, res, next) => {
-    const currentRole = req.user?.role;
+  (
+    req,
+    res,
+    next,
+  ) => {
+    const currentRole =
+      String(
+        req.user?.role ||
+        "",
+      )
+        .trim()
+        .toLowerCase();
 
-    if (!currentRole) {
-      return res.status(403).json({
-        success: false,
-        message: "Account role is missing",
-      });
-    }
+    if (
+      !currentRole ||
+      !allowedRoles.includes(
+        currentRole,
+      )
+    ) {
+      return res
+        .status(403)
+        .json({
+          success: false,
 
-    if (!roleCanAccess(currentRole, allowedRoles)) {
-      return res.status(403).json({
-        success: false,
-        message: "You do not have permission to access this resource",
-      });
+          message:
+            "You do not have permission to access this resource",
+        });
     }
 
     return next();
   };
 
-const authMiddleware = protect;
-const adminOnly = authorizeRoles("admin");
-
 export {
   protect,
-  authMiddleware,
   authorizeRoles,
-  roleCanAccess,
-  adminOnly,
+  authorizeRoles as authorize,
 };
-
-export default protect;

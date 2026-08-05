@@ -3,21 +3,69 @@ import express from "express";
 import {
   getMe,
   login,
+  logout,
   registerAccountByAdmin,
-  registerUser,
+  registerAdmin,
 } from "../controllers/auth.controller.js";
 
-import { protect } from "../middleware/auth.middleware.js";
+import {
+  authorizeRoles,
+  protect,
+} from "../middleware/auth.middleware.js";
 
-const router = express.Router();
+const router =
+  express.Router();
 
-router.post("/login", login);
-router.post("/register", registerUser);
+/*
+|--------------------------------------------------------------------------
+| Public routes
+|--------------------------------------------------------------------------
+*/
 
-/* Preserves your existing public secret admin-registration flow. */
-router.post("/admin-register", registerAccountByAdmin);
+/*
+ * Creates a super administrator.
+ *
+ * The controller always uses role: "admin".
+ */
+router.post(
+  "/admin-register",
+  registerAdmin,
+);
 
-router.get("/me", protect, getMe);
-router.get("/profile", protect, getMe);
+router.post(
+  "/login",
+  login,
+);
+
+/*
+|--------------------------------------------------------------------------
+| Authenticated routes
+|--------------------------------------------------------------------------
+*/
+
+router.get(
+  "/me",
+  protect,
+  getMe,
+);
+
+router.post(
+  "/logout",
+  protect,
+  logout,
+);
+
+/*
+|--------------------------------------------------------------------------
+| Administrator routes
+|--------------------------------------------------------------------------
+*/
+
+router.post(
+  "/register",
+  protect,
+  authorizeRoles("admin"),
+  registerAccountByAdmin,
+);
 
 export default router;
