@@ -5,25 +5,37 @@ import {
   getLotteryPlayById,
   createLotteryPlay,
   updateLotteryPlay,
-  updateLotteryPlayCheckedStatus,
   deleteLotteryPlay
 } from '../controllers/lotteryPlay.controller.js';
 
-import { protect } from '../middleware/auth.middleware.js';
+import {
+  protect,
+  authorizeRoles
+} from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
 router.use(protect);
 
 router.get('/', getLotteryPlays);
-router.post('/', createLotteryPlay);
 router.get('/:id', getLotteryPlayById);
-router.put('/:id', updateLotteryPlay);
-router.patch(
-  '/:id/checked-status',
-  protect,
-  updateLotteryPlayCheckedStatus
+
+router.post(
+  '/',
+  authorizeRoles('admin', 'user'),
+  createLotteryPlay
 );
-router.delete('/:id', deleteLotteryPlay);
+
+router.put(
+  '/:id',
+  authorizeRoles('admin', 'user'),
+  updateLotteryPlay
+);
+
+router.delete(
+  '/:id',
+  authorizeRoles('admin'),
+  deleteLotteryPlay
+);
 
 export default router;

@@ -1,122 +1,94 @@
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 
-import Rate from "../src/models/Rate.js";
-
-/*
-|--------------------------------------------------------------------------
-| Environment
-|--------------------------------------------------------------------------
-*/
-
 dotenv.config();
 
 /*
 |--------------------------------------------------------------------------
-| Seeder configuration
-|--------------------------------------------------------------------------
-*/
-
-const START_RATE = 65;
-const END_RATE = 109;
-
-/*
-|--------------------------------------------------------------------------
-| Generate rates
+| Rate Seeder
 |--------------------------------------------------------------------------
 |
-| Result:
+| Rates:
 |
 | 65%
-| 66%
-| 67%
-| ...
+| 70%
+| 75%
+| 80%
+| 85%
+| 90%
+| 95%
+| 100%
+| 101%
+| 102%
+| 103%
+| 104%
+| 105%
+| 106%
+| 107%
 | 108%
 | 109%
 |
 */
 
-const generateRates = () => {
-  const rates = [];
-
-  for (let number = START_RATE; number <= END_RATE; number += 1) {
-    rates.push({
-      name: `${number}%`,
-      number,
-      status: true,
-    });
-  }
-
-  return rates;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Connect MongoDB
-|--------------------------------------------------------------------------
-*/
-
-const connectDatabase = async () => {
-  if (!process.env.MONGO_URI) {
-    throw new Error("MONGO_URI is missing from .env");
-  }
-
-  await mongoose.connect(process.env.MONGO_URI);
-
-  console.log(`MongoDB connected: ${mongoose.connection.host}`);
-
-  console.log(`Database: ${mongoose.connection.name}`);
-};
-
-/*
-|--------------------------------------------------------------------------
-| Seed rates
-|--------------------------------------------------------------------------
-*/
+const RATE_VALUES = [
+  65, 70, 75, 80, 85, 90, 95, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+];
 
 const seedRates = async () => {
   try {
+    /*
+    |--------------------------------------------------------------------------
+    | MongoDB connection
+    |--------------------------------------------------------------------------
+    */
+
+    const mongoUri =
+      process.env.MONGO_URI || "mongodb://127.0.0.1:27017/finace_ms";
+
     console.log("");
-    console.log("======================================");
-    console.log(" Rate Seeder");
-    console.log("======================================");
+    console.log("========================================");
+    console.log("             RATE SEEDER");
+    console.log("========================================");
 
-    await connectDatabase();
+    console.log("");
+    console.log("Connecting to MongoDB...");
 
-    const rates = generateRates();
+    await mongoose.connect(mongoUri);
 
-    console.log(`Preparing ${rates.length} rates...`);
+    console.log(`MongoDB connected: ${mongoose.connection.host}`);
+
+    console.log(`Database: ${mongoose.connection.name}`);
 
     /*
     |--------------------------------------------------------------------------
-    | Upsert
+    | Rates collection
     |--------------------------------------------------------------------------
-    |
-    | We use number as the identifier.
-    |
-    | Existing:
-    |   65 -> update
-    |
-    | Missing:
-    |   65 -> create
-    |
-    | This prevents duplicate rate records when the seeder is run again.
-    |
     */
 
-    const operations = rates.map((rate) => ({
+    const ratesCollection = mongoose.connection.db.collection("rates");
+
+    /*
+    |--------------------------------------------------------------------------
+    | Build seed operations
+    |--------------------------------------------------------------------------
+    */
+
+    const operations = RATE_VALUES.map((number) => ({
       updateOne: {
         filter: {
-          number: rate.number,
+          number,
         },
 
         update: {
           $set: {
-            name: rate.name,
-
-            number: rate.number,
-
+            name: `${number}%`,
+            number,
             status: true,
+            updatedAt: new Date(),
+          },
+
+          $setOnInsert: {
+            createdAt: new Date(),
           },
         },
 
@@ -124,24 +96,21 @@ const seedRates = async () => {
       },
     }));
 
-    const result = await Rate.bulkWrite(operations, {
-      ordered: false,
-    });
+    console.log("");
+    console.log(`Preparing ${operations.length} rates...`);
 
     /*
     |--------------------------------------------------------------------------
-    | Seeder result
+    | Insert/update rates
     |--------------------------------------------------------------------------
     */
 
+    const result = await ratesCollection.bulkWrite(operations, {
+      ordered: false,
+    });
+
     console.log("");
-    console.log("Rate seeding completed successfully.");
-
-    console.log("--------------------------------------");
-
-    console.log(`Range: ${START_RATE}% - ${END_RATE}%`);
-
-    console.log(`Expected rates: ${rates.length}`);
+    console.log("Rate seeding completed.");
 
     console.log(`Inserted: ${result.upsertedCount || 0}`);
 
@@ -151,56 +120,54 @@ const seedRates = async () => {
 
     /*
     |--------------------------------------------------------------------------
-    | Verify database
+    | Verify seeded rates
     |--------------------------------------------------------------------------
     */
 
-    const databaseRates = await Rate.find({
-      number: {
-        $gte: START_RATE,
-
-        $lte: END_RATE,
-      },
-    })
+    const rates = await ratesCollection
+      .find({
+        number: {
+          $in: RATE_VALUES,
+        },
+      })
       .sort({
         number: 1,
       })
-      .lean();
+      .toArray();
 
-    console.log(
-      `Database contains ${databaseRates.length} rates between ${START_RATE}% and ${END_RATE}%.`,
-    );
+    console.log("");
+    console.log(`Total seeded rates: ${rates.length}`);
 
     console.log("");
 
-    console.log(databaseRates.map((rate) => `${rate.number}%`).join(", "));
+    console.log(rates.map((rate) => `${rate.number}%`).join(", "));
 
     console.log("");
-    console.log("======================================");
 
-    await mongoose.disconnect();
-
-    process.exit(0);
+    if (rates.length === RATE_VALUES.length) {
+      console.log("SUCCESS: All required rates are ready.");
+    } else {
+      console.log(
+        `WARNING: Expected ${RATE_VALUES.length} rates but found ${rates.length}.`,
+      );
+    }
   } catch (error) {
     console.error("");
-    console.error("Rate seeding failed:");
+    console.error("RATE SEEDER ERROR:");
 
     console.error(error);
 
+    process.exitCode = 1;
+  } finally {
     try {
       await mongoose.disconnect();
-    } catch {
-      // Ignore disconnect error.
-    }
 
-    process.exit(1);
+      console.log("");
+      console.log("MongoDB disconnected.");
+    } catch {
+      // Ignore disconnect error
+    }
   }
 };
-
-/*
-|--------------------------------------------------------------------------
-| Execute
-|--------------------------------------------------------------------------
-*/
 
 seedRates();

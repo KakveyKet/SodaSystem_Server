@@ -1,63 +1,104 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
-const customerTransactionSchema = new mongoose.Schema(
+const { Schema } = mongoose;
+
+const customerTransactionSchema = new Schema(
   {
     customerId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Customer',
-      required: [true, 'Customer ID is required']
+      type: Schema.Types.ObjectId,
+      ref: "Customer",
+      required: [true, "Customer is required"],
+      index: true,
     },
 
-    type: {
+    operation: {
       type: String,
-      enum: ['deposit', 'withdraw'],
-      required: [true, 'Transaction type is required']
+      enum: ["deposit", "withdraw"],
+      required: [true, "Transaction operation is required"],
+      index: true,
+    },
+
+    source: {
+      type: String,
+      enum: [
+        "customer_create",
+        "customer_update",
+        "balance_set",
+        "balance_deposit",
+        "balance_withdraw",
+        "opening_balance_backfill",
+      ],
+      required: true,
+      index: true,
+    },
+
+    requestedOperation: {
+      type: String,
+      enum: ["create", "update", "set", "deposit", "withdraw", "backfill"],
+      required: true,
     },
 
     amount: {
       type: Number,
-      required: [true, 'Amount is required'],
-      min: [0.01, 'Amount must be greater than 0']
+      required: [true, "Transaction amount is required"],
+      min: [0, "Transaction amount cannot be negative"],
     },
 
-    beforeBalance: {
+    oldBalance: {
       type: Number,
-      required: true
+      required: true,
+      min: [0, "Old balance cannot be negative"],
     },
 
-    afterBalance: {
+    newBalance: {
       type: Number,
-      required: true
+      required: true,
+      min: [0, "New balance cannot be negative"],
     },
 
-    note: {
+    transactionDate: {
+      type: Date,
+      required: true,
+      default: Date.now,
+      index: true,
+    },
+
+    description: {
       type: String,
-      default: '',
-      trim: true
+      trim: true,
+      default: "",
+      maxlength: [500, "Description cannot exceed 500 characters"],
     },
 
     createdBy: {
       type: String,
-      default: 'System'
-    }
+      trim: true,
+      default: "System",
+      maxlength: [150, "Created by cannot exceed 150 characters"],
+    },
+
+    createdByUserId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   {
     timestamps: true,
-    toJSON: {
-      virtuals: true,
-      versionKey: false,
-      transform(doc, ret) {
-        ret.id = ret._id.toString();
-        delete ret._id;
-        return ret;
-      }
-    }
-  }
+    versionKey: false,
+  },
 );
 
-const CustomerTransaction = mongoose.model(
-  'CustomerTransaction',
-  customerTransactionSchema
-);
+customerTransactionSchema.index({ operation: 1, transactionDate: -1 });
+customerTransactionSchema.index({ customerId: 1, transactionDate: -1 });
+customerTransactionSchema.index({
+  customerId: 1,
+  operation: 1,
+  transactionDate: -1,
+});
+
+const CustomerTransaction =
+  mongoose.models.CustomerTransaction ||
+  mongoose.model("CustomerTransaction", customerTransactionSchema);
 
 export default CustomerTransaction;

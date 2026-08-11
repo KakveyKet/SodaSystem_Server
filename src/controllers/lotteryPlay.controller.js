@@ -1,1333 +1,754 @@
-import mongoose from "mongoose";
+import mongoose from 'mongoose';
 
-import LotteryPlay from "../models/LotteryPlay.js";
-import Category from "../models/Category.js";
-import Product from "../models/Product.js";
-import Customer from "../models/Customer.js";
-import Rate from "../models/Rate.js";
+import LotteryPlay from '../models/LotteryPlay.js';
+import Category from '../models/Category.js';
+import Product from '../models/Product.js';
+import Customer from '../models/Customer.js';
 
-const MAX_PAGE_LIMIT = 500;
+const TWO_DIGIT_WIN_MULTIPLIER = 100;
+const THREE_DIGIT_WIN_MULTIPLIER = 600;
 
-/*
-|--------------------------------------------------------------------------
-| Error helpers
-|--------------------------------------------------------------------------
-*/
+const isValidObjectId = (value) => {
+  return mongoose.Types.ObjectId.isValid(value);
+};
 
 const createHttpError = (message, statusCode = 400) => {
   const error = new Error(message);
-
   error.statusCode = statusCode;
-
   return error;
 };
 
-const handleControllerError = (error, res, fallbackMessage) => {
-  console.error(`${fallbackMessage}:`, error);
+const normalizeString = (value) => String(value ?? '').trim();
 
-  if (error.statusCode) {
-    return res.status(error.statusCode).json({
-      success: false,
-      message: error.message,
-    });
-  }
-
-  if (error.name === "ValidationError") {
-    const validationMessage = Object.values(error.errors || {})[0]?.message;
-
-    return res.status(400).json({
-      success: false,
-
-      message: validationMessage || "Validation failed",
-    });
-  }
-
-  if (error.name === "CastError") {
-    return res.status(400).json({
-      success: false,
-
-      message: "Invalid data was provided",
-    });
-  }
-
-  if (error.code === 11000) {
-    return res.status(409).json({
-      success: false,
-
-      message: "A duplicate record already exists",
-    });
-  }
-
-  return res.status(500).json({
-    success: false,
-    message: fallbackMessage,
-  });
-};
-
-/*
-|--------------------------------------------------------------------------
-| General helpers
-|--------------------------------------------------------------------------
-*/
-
-const escapeRegex = (value = "") => {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-};
-
-const parsePositiveInteger = (value, fallback) => {
-  const parsedValue = Number.parseInt(value, 10);
-
-  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+const normalizeNumber = (value, fallback = 0) => {
+  if (value === null || value === undefined || value === '') {
     return fallback;
   }
 
-  return parsedValue;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 };
 
-const parseBooleanValue = (value) => {
-  if (value === true || value === "true" || value === 1 || value === "1") {
-    return true;
+const requireObjectId = (value, fieldName) => {
+  if (!value) {
+    throw createHttpError(`${fieldName} is required`, 400);
   }
 
-  if (value === false || value === "false" || value === 0 || value === "0") {
-    return false;
+  const id =
+    typeof value === 'object'
+      ? value._id || value.id
+      : value;
+
+  if (!isValidObjectId(id)) {
+    throw createHttpError(`${fieldName} is invalid`, 400);
   }
 
-  return undefined;
+  return String(id);
 };
 
-const normalizeBoolean = (value, fallback = false) => {
-  const parsedValue = parseBooleanValue(value);
-
-  if (parsedValue !== undefined) {
-    return parsedValue;
+const normalizeProductIds = (values) => {
+  if (!Array.isArray(values) || !values.length) {
+    throw createHttpError('At least one product is required', 400);
   }
 
-  return fallback;
-};
+  const ids = Array.from(
+    new Set(
+      values
+        .map((value) =>
+          typeof value === 'object'
+            ? value._id || value.id
+            : value
+        )
+        .map(String)
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
+  );
 
-const getActorName = (req) => {
-  return req.user?.username || req.user?.name || req.user?.email || "System";
-};
-
-const getValueId = (value) => {
-  if (value === null || value === undefined || value === "") {
-    return null;
+  if (!ids.length) {
+    throw createHttpError('At least one product is required', 400);
   }
 
-  if (mongoose.isValidObjectId(value)) {
-    return String(value);
+  if (ids.length > 2) {
+    throw createHttpError('A maximum of two products is allowed', 400);
   }
 
-  if (typeof value === "object") {
-    const nestedValue = value._id || value.id || null;
-
-    if (nestedValue && mongoose.isValidObjectId(nestedValue)) {
-      return String(nestedValue);
+  for (const id of ids) {
+    if (!isValidObjectId(id)) {
+      throw createHttpError('One or more product IDs are invalid', 400);
     }
+  }
+
+  return ids;
+};
+
+const normalizeRow = (row, index) => {
+  const rowNumber = index + 1;
+  const rowTitle = normalizeString(row?.rowTitle);
+
+  if (!rowTitle) {
+    throw createHttpError(`Row ${rowNumber}: Row name is required`, 400);
+  }
+
+  const categoryId = requireObjectId(
+    row?.categoryId,
+    `Row ${rowNumber}: Category`
+  );
+
+  const isTwoNumber = Boolean(row?.isTwoNumber);
+  const isThreeNumber = Boolean(row?.isThreeNumber);
+
+  if (!isTwoNumber && !isThreeNumber) {
+    throw createHttpError(`Row ${rowNumber}: Enable 2D or 3D`, 400);
+  }
+
+  let twoDigitNumber = null;
+  let threeDigitNumber = null;
+  let winTwoNumberType = 0;
+  let winThreeNumberType = 0;
+
+  if (isTwoNumber) {
+    if (
+      row?.twoDigitNumber === null ||
+      row?.twoDigitNumber === undefined ||
+      row?.twoDigitNumber === ''
+    ) {
+      throw createHttpError(`Row ${rowNumber}: 2D number is required`, 400);
+    }
+
+    twoDigitNumber = Number(row.twoDigitNumber);
+    winTwoNumberType = normalizeNumber(row?.winTwoNumberType, 0);
+
+    if (!Number.isFinite(twoDigitNumber) || twoDigitNumber < 0) {
+      throw createHttpError(
+        `Row ${rowNumber}: 2D number must be valid and non-negative`,
+        400
+      );
+    }
+
+    if (!Number.isFinite(winTwoNumberType) || winTwoNumberType < 0) {
+      throw createHttpError(
+        `Row ${rowNumber}: Correct 2D value must be valid and non-negative`,
+        400
+      );
+    }
+  }
+
+  if (isThreeNumber) {
+    if (
+      row?.threeDigitNumber === null ||
+      row?.threeDigitNumber === undefined ||
+      row?.threeDigitNumber === ''
+    ) {
+      throw createHttpError(`Row ${rowNumber}: 3D number is required`, 400);
+    }
+
+    threeDigitNumber = Number(row.threeDigitNumber);
+    winThreeNumberType = normalizeNumber(row?.winThreeNumberType, 0);
+
+    if (!Number.isFinite(threeDigitNumber) || threeDigitNumber < 0) {
+      throw createHttpError(
+        `Row ${rowNumber}: 3D number must be valid and non-negative`,
+        400
+      );
+    }
+
+    if (!Number.isFinite(winThreeNumberType) || winThreeNumberType < 0) {
+      throw createHttpError(
+        `Row ${rowNumber}: Correct 3D value must be valid and non-negative`,
+        400
+      );
+    }
+  }
+
+  return {
+    rowTitle,
+    categoryId,
+    twoDigitNumber,
+    threeDigitNumber,
+    winTwoNumberType,
+    winThreeNumberType,
+    isTwoNumber,
+    isThreeNumber,
+    checkedStatus: Boolean(row?.checkedStatus)
+  };
+};
+
+const normalizeRows = (rows) => {
+  if (!Array.isArray(rows) || !rows.length) {
+    throw createHttpError('At least one invoice row is required', 400);
+  }
+
+  return rows.map(normalizeRow);
+};
+
+const validateReferences = async ({ customerId, productIds, rows }) => {
+  const customer = await Customer.findById(customerId)
+    .select('_id status')
+    .lean();
+
+  if (!customer) {
+    throw createHttpError('Customer not found', 404);
+  }
+
+  if (customer.status === false) {
+    throw createHttpError('Customer is inactive', 400);
+  }
+
+  const productCount = await Product.countDocuments({
+    _id: { $in: productIds },
+    status: { $ne: false }
+  });
+
+  if (productCount !== productIds.length) {
+    throw createHttpError(
+      'One or more products are invalid or inactive',
+      400
+    );
+  }
+
+  const categoryIds = Array.from(
+    new Set(rows.map((row) => String(row.categoryId)))
+  );
+
+  const categoryCount = await Category.countDocuments({
+    _id: { $in: categoryIds },
+    status: { $ne: false }
+  });
+
+  if (categoryCount !== categoryIds.length) {
+    throw createHttpError(
+      'One or more row categories are invalid or inactive',
+      400
+    );
+  }
+};
+
+const normalizePlayPayload = async (body) => {
+  const title = normalizeString(body?.title);
+
+  if (!title) {
+    throw createHttpError('Invoice name is required', 400);
+  }
+
+  const customerId = requireObjectId(body?.customerId, 'Customer');
+  const productIds = normalizeProductIds(body?.productIds);
+  const rows = normalizeRows(body?.rows);
+
+  const playDate = body?.playDate
+    ? new Date(body.playDate)
+    : new Date();
+
+  if (Number.isNaN(playDate.getTime())) {
+    throw createHttpError('Invoice date is invalid', 400);
+  }
+
+  const twoDigitRate = normalizeNumber(body?.twoDigitRate, 100);
+  const threeDigitRate = normalizeNumber(body?.threeDigitRate, 65);
+
+  if (twoDigitRate <= 0) {
+    throw createHttpError('2D rate must be greater than zero', 400);
+  }
+
+  if (threeDigitRate <= 0) {
+    throw createHttpError('3D rate must be greater than zero', 400);
+  }
+
+  await validateReferences({ customerId, productIds, rows });
+
+  return {
+    title,
+    customerId,
+    productIds,
+    playDate,
+    twoDigitRate,
+    threeDigitRate,
+    rows
+  };
+};
+
+const getRatePercent = (value) => {
+  const rate = Number(value || 0);
+  return rate > 0 ? rate : 100;
+};
+
+const calculateAmountWithRate = (amount, rate) => {
+  return (Number(amount || 0) * getRatePercent(rate)) / 100;
+};
+
+const toPlayResultNumber = (value) => {
+  return Math.trunc(Math.abs(Number(value || 0)));
+};
+
+const calculateRows = (rows, twoDigitRate, threeDigitRate) => {
+  let twoDigitBaseTotal = 0;
+  let threeDigitBaseTotal = 0;
+  let twoDigitCorrectTotal = 0;
+  let threeDigitCorrectTotal = 0;
+
+  for (const row of rows) {
+    if (row.isTwoNumber) {
+      twoDigitBaseTotal += Number(row.twoDigitNumber || 0);
+      twoDigitCorrectTotal += Number(row.winTwoNumberType || 0);
+    }
+
+    if (row.isThreeNumber) {
+      threeDigitBaseTotal += Number(row.threeDigitNumber || 0);
+      threeDigitCorrectTotal += Number(row.winThreeNumberType || 0);
+    }
+  }
+
+  const twoDigitGrandTotal = calculateAmountWithRate(
+    twoDigitBaseTotal,
+    twoDigitRate
+  );
+
+  const threeDigitGrandTotal = calculateAmountWithRate(
+    threeDigitBaseTotal,
+    threeDigitRate
+  );
+
+  const twoDigitCorrectDeduction =
+    twoDigitCorrectTotal * TWO_DIGIT_WIN_MULTIPLIER;
+
+  const threeDigitCorrectDeduction =
+    threeDigitCorrectTotal * THREE_DIGIT_WIN_MULTIPLIER;
+
+  const twoDigitResult = toPlayResultNumber(twoDigitGrandTotal);
+  const threeDigitResult = toPlayResultNumber(threeDigitGrandTotal);
+  const twoDigitCorrectResult = toPlayResultNumber(
+    twoDigitCorrectDeduction
+  );
+  const threeDigitCorrectResult = toPlayResultNumber(
+    threeDigitCorrectDeduction
+  );
+
+  return {
+    twoDigitBaseTotal,
+    threeDigitBaseTotal,
+    twoDigitRate,
+    threeDigitRate,
+    twoDigitCorrectTotal,
+    threeDigitCorrectTotal,
+    twoDigitGrandTotal,
+    threeDigitGrandTotal,
+    twoDigitCorrectDeduction,
+    threeDigitCorrectDeduction,
+    twoDigitResult,
+    threeDigitResult,
+    twoDigitCorrectResult,
+    threeDigitCorrectResult,
+    grandTotal:
+      twoDigitResult +
+      threeDigitResult -
+      twoDigitCorrectResult -
+      threeDigitCorrectResult
+  };
+};
+
+const getCategoryIdentity = (row, legacyCategoryId = null) => {
+  const value = row?.categoryId || row?.category || legacyCategoryId;
+
+  if (!value) {
+    return {
+      categoryId: null,
+      categoryName: '-'
+    };
+  }
+
+  if (typeof value === 'object') {
+    return {
+      categoryId: String(value._id || value.id || ''),
+      categoryName: value.name || '-'
+    };
+  }
+
+  return {
+    categoryId: String(value),
+    categoryName: '-'
+  };
+};
+
+const getLegacyCategoryId = (play) => {
+  if (play?.categoryId) {
+    return play.categoryId;
+  }
+
+  if (Array.isArray(play?.categoryIds) && play.categoryIds.length) {
+    return play.categoryIds[0];
   }
 
   return null;
 };
 
-const validateObjectId = (value, fieldName) => {
-  const objectId = getValueId(value);
+const calculateCategoryGroups = (play) => {
+  const rows = Array.isArray(play?.rows) ? play.rows : [];
+  const legacyCategoryId = getLegacyCategoryId(play);
+  const groups = new Map();
 
-  if (!objectId) {
-    throw createHttpError(`${fieldName} is invalid`, 400);
+  for (const row of rows) {
+    const identity = getCategoryIdentity(row, legacyCategoryId);
+    const key = identity.categoryId || '__uncategorized__';
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        categoryId: identity.categoryId,
+        categoryName: identity.categoryName,
+        rows: []
+      });
+    }
+
+    const group = groups.get(key);
+
+    if (group.categoryName === '-' && identity.categoryName !== '-') {
+      group.categoryName = identity.categoryName;
+    }
+
+    group.rows.push(row);
   }
 
-  return objectId;
+  return Array.from(groups.values()).map((group) => ({
+    categoryId: group.categoryId,
+    categoryName: group.categoryName,
+    rowCount: group.rows.length,
+    calculation: calculateRows(
+      group.rows,
+      Number(play?.twoDigitRate || 100),
+      Number(play?.threeDigitRate || 100)
+    )
+  }));
 };
 
-const normalizeRequiredDate = (value, fieldName) => {
-  if (!value) {
-    throw createHttpError(`${fieldName} is required`, 400);
-  }
+const serializePlay = (play) => {
+  const data =
+    typeof play?.toObject === 'function'
+      ? play.toObject()
+      : { ...play };
 
-  const text = String(value).trim();
-
-  let date;
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    date = new Date(`${text}T00:00:00.000Z`);
-  } else {
-    date = new Date(value);
-  }
-
-  if (Number.isNaN(date.getTime())) {
-    throw createHttpError(`${fieldName} is invalid`, 400);
-  }
-
-  return date;
+  return {
+    ...data,
+    categoryGroups: calculateCategoryGroups(data)
+  };
 };
 
-const parseDateBoundary = (value, endOfDay = false) => {
-  if (!value) {
-    return null;
-  }
+const handleControllerError = (
+  error,
+  res,
+  fallbackMessage
+) => {
+  console.error(fallbackMessage, error);
 
-  const text = String(value).trim();
-
-  let date;
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
-    date = new Date(`${text}T${endOfDay ? "23:59:59.999Z" : "00:00:00.000Z"}`);
-  } else {
-    date = new Date(text);
-  }
-
-  if (Number.isNaN(date.getTime())) {
-    throw createHttpError(`Invalid date: ${text}`, 400);
-  }
-
-  return date;
-};
-
-const appendAndCondition = (filter, condition) => {
-  if (!Array.isArray(filter.$and)) {
-    filter.$and = [];
-  }
-
-  filter.$and.push(condition);
-};
-
-const parseCommaSeparatedIds = (value, fieldName) => {
-  const source = Array.isArray(value) ? value : String(value).split(",");
-
-  const ids = source
-    .map((item) => {
-      return String(item).trim();
-    })
-    .filter(Boolean)
-    .map((item) => {
-      return validateObjectId(item, fieldName);
+  if (error.statusCode) {
+    return res.status(error.statusCode).json({
+      success: false,
+      message: error.message
     });
-
-  return Array.from(new Set(ids));
-};
-
-/*
-|--------------------------------------------------------------------------
-| Multiple-reference input helper
-|--------------------------------------------------------------------------
-*/
-
-const getMultipleReferenceInput = ({
-  body = {},
-  pluralField,
-  legacyField,
-  label,
-}) => {
-  const hasPluralField = Object.prototype.hasOwnProperty.call(
-    body,
-    pluralField,
-  );
-
-  const hasLegacyField = Object.prototype.hasOwnProperty.call(
-    body,
-    legacyField,
-  );
-
-  if (!hasPluralField && !hasLegacyField) {
-    return {
-      provided: false,
-      ids: null,
-    };
   }
 
-  const source = hasPluralField ? body[pluralField] : [body[legacyField]];
-
-  if (!Array.isArray(source)) {
-    throw createHttpError(`${pluralField} must be an array`, 400);
-  }
-
-  const cleanedSource = source.filter((value) => {
-    return value !== null && value !== undefined && value !== "";
-  });
-
-  if (cleanedSource.length === 0) {
-    throw createHttpError(
-      `At least one ${label.toLowerCase()} is required`,
-      400,
-    );
-  }
-
-  const ids = cleanedSource.map((referenceValue) => {
-    return validateObjectId(referenceValue, `${label} ID`);
-  });
-
-  const uniqueIds = Array.from(new Set(ids));
-
-  if (uniqueIds.length !== ids.length) {
-    throw createHttpError(
-      `Duplicate ${label.toLowerCase()} selections are not allowed`,
-      400,
-    );
-  }
-
-  return {
-    provided: true,
-    ids: uniqueIds,
-  };
-};
-
-/*
-|--------------------------------------------------------------------------
-| Category helpers
-|--------------------------------------------------------------------------
-*/
-
-const getCategoryInput = (body = {}) => {
-  const result = getMultipleReferenceInput({
-    body,
-
-    pluralField: "categoryIds",
-
-    legacyField: "categoryId",
-
-    label: "Category",
-  });
-
-  return {
-    provided: result.provided,
-
-    categoryIds: result.ids,
-  };
-};
-
-const validateCategories = async (categoryIds) => {
-  if (!Array.isArray(categoryIds) || categoryIds.length === 0) {
-    throw createHttpError("At least one category is required", 400);
-  }
-
-  const categories = await Category.find({
-    _id: {
-      $in: categoryIds,
-    },
-  })
-    .select("_id name status")
-    .lean();
-
-  if (categories.length !== categoryIds.length) {
-    throw createHttpError("One or more selected categories do not exist", 404);
-  }
-
-  const inactiveCategory = categories.find((category) => {
-    return category.status === false;
-  });
-
-  if (inactiveCategory) {
-    throw createHttpError(
-      `Category "${inactiveCategory.name}" is inactive`,
-      400,
-    );
-  }
-
-  return categories;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Product helpers
-|--------------------------------------------------------------------------
-*/
-
-const getProductInput = (body = {}) => {
-  const result = getMultipleReferenceInput({
-    body,
-
-    pluralField: "productIds",
-
-    legacyField: "productId",
-
-    label: "Product",
-  });
-
-  return {
-    provided: result.provided,
-
-    productIds: result.ids,
-  };
-};
-
-const validateProducts = async (productIds) => {
-  if (!Array.isArray(productIds) || productIds.length === 0) {
-    throw createHttpError("At least one product is required", 400);
-  }
-
-  const products = await Product.find({
-    _id: {
-      $in: productIds,
-    },
-  })
-    .select("_id name status winMultiplier")
-    .lean();
-
-  if (products.length !== productIds.length) {
-    throw createHttpError("One or more selected products do not exist", 404);
-  }
-
-  const inactiveProduct = products.find((product) => {
-    return product.status === false;
-  });
-
-  if (inactiveProduct) {
-    throw createHttpError(`Product "${inactiveProduct.name}" is inactive`, 400);
-  }
-
-  /*
-   * Products and Categories are independent.
-   *
-   * There is no Product-Category validation here.
-   */
-  return products;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Customer helper
-|--------------------------------------------------------------------------
-*/
-
-const validateCustomer = async (customerId) => {
-  const customer = await Customer.findById(customerId)
-    .select("_id username status")
-    .lean();
-
-  if (!customer) {
-    throw createHttpError("Customer not found", 404);
-  }
-
-  if (customer.status === false) {
-    throw createHttpError("The selected customer is inactive", 400);
-  }
-
-  return customer;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Rate helpers
-|--------------------------------------------------------------------------
-*/
-
-const normalizeRateNumber = (value, fieldName) => {
-  const number = Number(value);
-
-  if (!Number.isFinite(number) || number <= 0) {
-    throw createHttpError(`${fieldName} is invalid`, 400);
-  }
-
-  return number;
-};
-
-const resolveActiveRate = async (value, fieldName) => {
-  const number = normalizeRateNumber(value, fieldName);
-
-  const rate = await Rate.findOne({
-    number,
-    status: true,
-  })
-    .select("_id name number status")
-    .lean();
-
-  if (!rate) {
-    throw createHttpError(`${fieldName} does not exist or is inactive`, 400);
-  }
-
-  return rate;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Row number validation
-|--------------------------------------------------------------------------
-|
-| There is no maximum value for 2D or 3D.
-|
-*/
-
-const validatePlayNumber = (value, rowNumber, numberType) => {
-  if (value === null || value === undefined || value === "") {
-    throw createHttpError(
-      `Row ${rowNumber} ${numberType} number is required`,
-      400,
-    );
-  }
-
-  const number = Number(value);
-
-  if (!Number.isFinite(number)) {
-    throw createHttpError(
-      `Row ${rowNumber} has an invalid ${numberType} number`,
-      400,
-    );
-  }
-
-  if (number < 0) {
-    throw createHttpError(
-      `Row ${rowNumber} ${numberType} number cannot be negative`,
-      400,
-    );
-  }
-
-  return number;
-};
-
-const validateTwoDigitNumber = (value, rowNumber) => {
-  return validatePlayNumber(value, rowNumber, "2D");
-};
-
-const validateThreeDigitNumber = (value, rowNumber) => {
-  return validatePlayNumber(value, rowNumber, "3D");
-};
-
-const normalizeNonNegativeNumber = (value, fieldName) => {
-  const number = Number(value ?? 0);
-
-  if (!Number.isFinite(number) || number < 0) {
-    throw createHttpError(
-      `${fieldName} must be a valid non-negative number`,
-      400,
-    );
-  }
-
-  return number;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Normalize rows
-|--------------------------------------------------------------------------
-*/
-
-const normalizeRows = (rows) => {
-  if (!Array.isArray(rows) || rows.length === 0) {
-    throw createHttpError("At least one play row is required", 400);
-  }
-
-  return rows.map((row, index) => {
-    const rowNumber = index + 1;
-
-    if (!row || typeof row !== "object" || Array.isArray(row)) {
-      throw createHttpError(`Row ${rowNumber} is invalid`, 400);
-    }
-
-    const rowTitle = String(row.rowTitle ?? "").trim();
-
-    if (!rowTitle) {
-      throw createHttpError(`Row ${rowNumber} title is required`, 400);
-    }
-
-    const isTwoNumber = normalizeBoolean(row.isTwoNumber, false);
-
-    const isThreeNumber = normalizeBoolean(row.isThreeNumber, false);
-
-    const twoDigitNumber = isTwoNumber
-      ? validateTwoDigitNumber(row.twoDigitNumber, rowNumber)
-      : null;
-
-    const threeDigitNumber = isThreeNumber
-      ? validateThreeDigitNumber(row.threeDigitNumber, rowNumber)
-      : null;
-
-    const winTwoNumberType = isTwoNumber
-      ? normalizeNonNegativeNumber(
-          row.winTwoNumberType,
-          `Row ${rowNumber} correct 2D value`,
-        )
-      : 0;
-
-    const winThreeNumberType = isThreeNumber
-      ? normalizeNonNegativeNumber(
-          row.winThreeNumberType,
-          `Row ${rowNumber} correct 3D value`,
-        )
-      : 0;
-
-    const twoDigitAmount = isTwoNumber
-      ? normalizeNonNegativeNumber(
-          row.twoDigitAmount,
-          `Row ${rowNumber} 2D amount`,
-        )
-      : 0;
-
-    const threeDigitAmount = isThreeNumber
-      ? normalizeNonNegativeNumber(
-          row.threeDigitAmount,
-          `Row ${rowNumber} 3D amount`,
-        )
-      : 0;
-
-    const normalizedRow = {
-      rowTitle,
-
-      twoDigitNumber,
-      threeDigitNumber,
-
-      winTwoNumberType,
-      winThreeNumberType,
-
-      twoDigitAmount,
-      threeDigitAmount,
-
-      isTwoNumber,
-      isThreeNumber,
-
-      checkedStatus: normalizeBoolean(row.checkedStatus, false),
-    };
-
-    const rowId = getValueId(row._id || row.id);
-
-    if (rowId) {
-      normalizedRow._id = rowId;
-    }
-
-    return normalizedRow;
-  });
-};
-
-/*
-|--------------------------------------------------------------------------
-| Population helper
-|--------------------------------------------------------------------------
-*/
-
-const populateLotteryPlay = (query) => {
-  return query
-    .populate({
-      path: "categoryIds",
-
-      select: "name description status",
-    })
-
-    .populate({
-      path: "categoryId",
-
-      select: "name description status",
-    })
-
-    .populate({
-      path: "productIds",
-
-      select: "name winMultiplier description status",
-    })
-
-    .populate({
-      path: "productId",
-
-      select: "name winMultiplier description status",
-    })
-
-    .populate({
-      path: "customerId",
-
-      select:
-        "username branchId phoneNumber address description balance status",
+  if (error.name === 'ValidationError') {
+    const message =
+      Object.values(error.errors || {})[0]?.message ||
+      'Validation failed';
+
+    return res.status(400).json({
+      success: false,
+      message
     });
+  }
+
+  if (error.name === 'CastError') {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid ID'
+    });
+  }
+
+  return res.status(500).json({
+    success: false,
+    message: fallbackMessage
+  });
 };
 
-/*
-|--------------------------------------------------------------------------
-| Normalize old populated invoices
-|--------------------------------------------------------------------------
-*/
+const buildListFilter = (req) => {
+  const filter = {};
+  const search = normalizeString(req.query.search);
 
-const normalizePopulatedPlay = (lotteryPlay) => {
-  if (!lotteryPlay) {
-    return lotteryPlay;
+  if (search) {
+    filter.$or = [
+      {
+        title: {
+          $regex: search,
+          $options: 'i'
+        }
+      },
+      {
+        'rows.rowTitle': {
+          $regex: search,
+          $options: 'i'
+        }
+      }
+    ];
   }
 
   if (
-    (!Array.isArray(lotteryPlay.categoryIds) ||
-      lotteryPlay.categoryIds.length === 0) &&
-    lotteryPlay.categoryId
+    req.query.customerId &&
+    isValidObjectId(req.query.customerId)
   ) {
-    lotteryPlay.categoryIds = [lotteryPlay.categoryId];
+    filter.customerId = req.query.customerId;
   }
 
   if (
-    !lotteryPlay.categoryId &&
-    Array.isArray(lotteryPlay.categoryIds) &&
-    lotteryPlay.categoryIds.length > 0
+    req.query.productId &&
+    isValidObjectId(req.query.productId)
   ) {
-    lotteryPlay.categoryId = lotteryPlay.categoryIds[0];
+    filter.productIds = req.query.productId;
   }
 
   if (
-    (!Array.isArray(lotteryPlay.productIds) ||
-      lotteryPlay.productIds.length === 0) &&
-    lotteryPlay.productId
+    req.query.categoryId &&
+    isValidObjectId(req.query.categoryId)
   ) {
-    lotteryPlay.productIds = [lotteryPlay.productId];
-  }
+    const categoryConditions = [
+      { 'rows.categoryId': req.query.categoryId },
+      { categoryId: req.query.categoryId },
+      { categoryIds: req.query.categoryId }
+    ];
 
-  if (
-    !lotteryPlay.productId &&
-    Array.isArray(lotteryPlay.productIds) &&
-    lotteryPlay.productIds.length > 0
-  ) {
-    lotteryPlay.productId = lotteryPlay.productIds[0];
-  }
-
-  return lotteryPlay;
-};
-
-const normalizePopulatedPlays = (lotteryPlays) => {
-  return lotteryPlays.map(normalizePopulatedPlay);
-};
-
-/*
-|--------------------------------------------------------------------------
-| GET /api/lottery-plays
-|--------------------------------------------------------------------------
-*/
-
-const getLotteryPlays = async (req, res) => {
-  try {
-    const page = parsePositiveInteger(req.query.page, 1);
-
-    const limit = Math.min(
-      parsePositiveInteger(req.query.limit, 10),
-      MAX_PAGE_LIMIT,
-    );
-
-    const skip = (page - 1) * limit;
-
-    const filter = {};
-
-    /*
-      |--------------------------------------------------------------------------
-      | Search
-      |--------------------------------------------------------------------------
-      */
-
-    const search = String(req.query.search ?? "").trim();
-
-    if (search) {
-      const safeSearch = escapeRegex(search);
-
-      filter.$or = [
-        {
-          title: {
-            $regex: safeSearch,
-
-            $options: "i",
-          },
-        },
-
-        {
-          "rows.rowTitle": {
-            $regex: safeSearch,
-
-            $options: "i",
-          },
-        },
+    if (filter.$or) {
+      filter.$and = [
+        { $or: filter.$or },
+        { $or: categoryConditions }
       ];
+      delete filter.$or;
+    } else {
+      filter.$or = categoryConditions;
     }
+  }
 
-    /*
-      |--------------------------------------------------------------------------
-      | Single category filter
-      |--------------------------------------------------------------------------
-      */
+  if (req.query.dateFrom || req.query.dateTo) {
+    filter.playDate = {};
 
-    if (req.query.categoryId) {
-      const categoryId = validateObjectId(req.query.categoryId, "Category ID");
+    if (req.query.dateFrom) {
+      const dateFrom = new Date(`${req.query.dateFrom}T00:00:00.000`);
 
-      appendAndCondition(filter, {
-        $or: [
-          {
-            categoryIds: categoryId,
-          },
-
-          {
-            categoryId,
-          },
-        ],
-      });
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Multiple category filter
-      |--------------------------------------------------------------------------
-      |
-      | categoryIds=id1,id2
-      |
-      | The invoice must contain all supplied categories.
-      |
-      */
-
-    if (req.query.categoryIds) {
-      const categoryIds = parseCommaSeparatedIds(
-        req.query.categoryIds,
-        "Category ID",
-      );
-
-      if (categoryIds.length === 1) {
-        appendAndCondition(filter, {
-          $or: [
-            {
-              categoryIds: categoryIds[0],
-            },
-
-            {
-              categoryId: categoryIds[0],
-            },
-          ],
-        });
-      } else if (categoryIds.length > 1) {
-        appendAndCondition(filter, {
-          categoryIds: {
-            $all: categoryIds,
-          },
-        });
-      }
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Single product filter
-      |--------------------------------------------------------------------------
-      */
-
-    if (req.query.productId) {
-      const productId = validateObjectId(req.query.productId, "Product ID");
-
-      appendAndCondition(filter, {
-        $or: [
-          {
-            productIds: productId,
-          },
-
-          {
-            productId,
-          },
-        ],
-      });
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Multiple product filter
-      |--------------------------------------------------------------------------
-      |
-      | productIds=id1,id2
-      |
-      */
-
-    if (req.query.productIds) {
-      const productIds = parseCommaSeparatedIds(
-        req.query.productIds,
-        "Product ID",
-      );
-
-      if (productIds.length === 1) {
-        appendAndCondition(filter, {
-          $or: [
-            {
-              productIds: productIds[0],
-            },
-
-            {
-              productId: productIds[0],
-            },
-          ],
-        });
-      } else if (productIds.length > 1) {
-        appendAndCondition(filter, {
-          productIds: {
-            $all: productIds,
-          },
-        });
-      }
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Customer filter
-      |--------------------------------------------------------------------------
-      */
-
-    if (req.query.customerId) {
-      filter.customerId = validateObjectId(req.query.customerId, "Customer ID");
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Status filters
-      |--------------------------------------------------------------------------
-      */
-
-    const status = parseBooleanValue(req.query.status);
-
-    if (status !== undefined) {
-      filter.status = status;
-    }
-
-    const checkedStatus = parseBooleanValue(req.query.checkedStatus);
-
-    if (checkedStatus !== undefined) {
-      filter.checkedStatus = checkedStatus;
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Date filter
-      |--------------------------------------------------------------------------
-      */
-
-    const dateFrom = parseDateBoundary(req.query.dateFrom, false);
-
-    const dateTo = parseDateBoundary(req.query.dateTo, true);
-
-    if (dateFrom || dateTo) {
-      filter.playDate = {};
-
-      if (dateFrom) {
+      if (!Number.isNaN(dateFrom.getTime())) {
         filter.playDate.$gte = dateFrom;
       }
+    }
 
-      if (dateTo) {
+    if (req.query.dateTo) {
+      const dateTo = new Date(`${req.query.dateTo}T23:59:59.999`);
+
+      if (!Number.isNaN(dateTo.getTime())) {
         filter.playDate.$lte = dateTo;
       }
     }
 
-    /*
-      |--------------------------------------------------------------------------
-      | Query
-      |--------------------------------------------------------------------------
-      */
+    if (!Object.keys(filter.playDate).length) {
+      delete filter.playDate;
+    }
+  }
 
-    const [lotteryPlays, total] = await Promise.all([
-      populateLotteryPlay(LotteryPlay.find(filter))
-        .sort({
-          playDate: -1,
-          createdAt: -1,
-          _id: -1,
-        })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+  return filter;
+};
 
-      LotteryPlay.countDocuments(filter),
+const populatePlay = (query) => {
+  return query
+    .populate({
+      path: 'customerId',
+      select:
+        'branchId phoneNumber address description balance status userId username name email',
+      populate: {
+        path: 'userId',
+        select: 'username email role status'
+      }
+    })
+    .populate({
+      path: 'productIds',
+      select:
+        'name code playType numberType productType categoryId category status'
+    })
+    .populate({
+      path: 'rows.categoryId',
+      select: 'name status'
+    });
+};
+
+const getLotteryPlays = async (req, res) => {
+  try {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(
+      Math.max(Number(req.query.limit || 10), 1),
+      500
+    );
+    const skip = (page - 1) * limit;
+    const filter = buildListFilter(req);
+
+    const [plays, total] = await Promise.all([
+      populatePlay(
+        LotteryPlay.find(filter)
+          .sort({ playDate: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+      ),
+      LotteryPlay.countDocuments(filter)
     ]);
-
-    const pages = Math.max(Math.ceil(total / limit), 1);
 
     return res.status(200).json({
       success: true,
-
-      data: normalizePopulatedPlays(lotteryPlays),
-
+      data: plays.map(serializePlay),
       pagination: {
         page,
         limit,
         total,
-        pages,
-      },
-    });
-  } catch (error) {
-    return handleControllerError(error, res, "Could not fetch invoices");
-  }
-};
-
-/*
-|--------------------------------------------------------------------------
-| GET /api/lottery-plays/:id
-|--------------------------------------------------------------------------
-*/
-
-const getLotteryPlayById = async (req, res) => {
-  try {
-    const playId = validateObjectId(req.params.id, "Invoice ID");
-
-    const lotteryPlay = await populateLotteryPlay(
-      LotteryPlay.findById(playId),
-    ).lean();
-
-    if (!lotteryPlay) {
-      throw createHttpError("Invoice not found", 404);
-    }
-
-    return res.status(200).json({
-      success: true,
-
-      data: normalizePopulatedPlay(lotteryPlay),
-    });
-  } catch (error) {
-    return handleControllerError(error, res, "Could not fetch invoice");
-  }
-};
-
-/*
-|--------------------------------------------------------------------------
-| POST /api/lottery-plays
-|--------------------------------------------------------------------------
-*/
-
-const createLotteryPlay = async (req, res) => {
-  try {
-    const title = String(req.body.title ?? "").trim();
-
-    if (!title) {
-      throw createHttpError("Invoice name is required", 400);
-    }
-
-    const categoryInput = getCategoryInput(req.body);
-
-    if (!categoryInput.provided) {
-      throw createHttpError("At least one category is required", 400);
-    }
-
-    const productInput = getProductInput(req.body);
-
-    if (!productInput.provided) {
-      throw createHttpError("At least one product is required", 400);
-    }
-
-    const categoryIds = categoryInput.categoryIds;
-
-    const productIds = productInput.productIds;
-
-    const customerId = validateObjectId(req.body.customerId, "Customer ID");
-
-    const playDate = normalizeRequiredDate(req.body.playDate, "Invoice date");
-
-    const rows = normalizeRows(req.body.rows);
-
-    const [categories, products, customer, twoDigitRate, threeDigitRate] =
-      await Promise.all([
-        validateCategories(categoryIds),
-
-        validateProducts(productIds),
-
-        validateCustomer(customerId),
-
-        resolveActiveRate(req.body.twoDigitRate, "2D rate"),
-
-        resolveActiveRate(req.body.threeDigitRate, "3D rate"),
-      ]);
-
-    void categories;
-    void products;
-    void customer;
-
-    const status = parseBooleanValue(req.body.status);
-
-    const actor = getActorName(req);
-
-    const lotteryPlay = await LotteryPlay.create({
-      title,
-
-      categoryIds,
-
-      categoryId: categoryIds[0],
-
-      productIds,
-
-      productId: productIds[0],
-
-      customerId,
-
-      playDate,
-
-      twoDigitRate: twoDigitRate.number,
-
-      threeDigitRate: threeDigitRate.number,
-
-      rows,
-
-      checkedStatus: false,
-
-      status: status !== undefined ? status : true,
-
-      createdBy: actor,
-
-      updatedBy: actor,
-    });
-
-    const populatedPlay = await populateLotteryPlay(
-      LotteryPlay.findById(lotteryPlay._id),
-    ).lean();
-
-    return res.status(201).json({
-      success: true,
-
-      message: "Invoice created successfully",
-
-      data: normalizePopulatedPlay(populatedPlay),
-    });
-  } catch (error) {
-    return handleControllerError(error, res, "Could not create invoice");
-  }
-};
-
-/*
-|--------------------------------------------------------------------------
-| PUT /api/lottery-plays/:id
-|--------------------------------------------------------------------------
-*/
-
-const updateLotteryPlay = async (req, res) => {
-  try {
-    const playId = validateObjectId(req.params.id, "Invoice ID");
-
-    const lotteryPlay = await LotteryPlay.findById(playId);
-
-    if (!lotteryPlay) {
-      throw createHttpError("Invoice not found", 404);
-    }
-
-    const categoryInput = getCategoryInput(req.body);
-
-    const productInput = getProductInput(req.body);
-
-    let customerId = null;
-
-    let twoDigitRate = null;
-
-    let threeDigitRate = null;
-
-    const validations = [];
-
-    /*
-      |--------------------------------------------------------------------------
-      | Reference validation
-      |--------------------------------------------------------------------------
-      */
-
-    if (categoryInput.provided) {
-      validations.push(validateCategories(categoryInput.categoryIds));
-    }
-
-    if (productInput.provided) {
-      validations.push(validateProducts(productInput.productIds));
-    }
-
-    if (req.body.customerId !== undefined) {
-      customerId = validateObjectId(req.body.customerId, "Customer ID");
-
-      validations.push(validateCustomer(customerId));
-    }
-
-    if (req.body.twoDigitRate !== undefined) {
-      validations.push(
-        resolveActiveRate(req.body.twoDigitRate, "2D rate").then((rate) => {
-          twoDigitRate = rate.number;
-
-          return rate;
-        }),
-      );
-    }
-
-    if (req.body.threeDigitRate !== undefined) {
-      validations.push(
-        resolveActiveRate(req.body.threeDigitRate, "3D rate").then((rate) => {
-          threeDigitRate = rate.number;
-
-          return rate;
-        }),
-      );
-    }
-
-    await Promise.all(validations);
-
-    /*
-      |--------------------------------------------------------------------------
-      | Apply category update
-      |--------------------------------------------------------------------------
-      */
-
-    if (categoryInput.provided) {
-      lotteryPlay.categoryIds = categoryInput.categoryIds;
-
-      lotteryPlay.categoryId = categoryInput.categoryIds[0];
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Apply product update
-      |--------------------------------------------------------------------------
-      */
-
-    if (productInput.provided) {
-      lotteryPlay.productIds = productInput.productIds;
-
-      lotteryPlay.productId = productInput.productIds[0];
-    }
-
-    /*
-      |--------------------------------------------------------------------------
-      | Apply basic field updates
-      |--------------------------------------------------------------------------
-      */
-
-    if (req.body.title !== undefined) {
-      const title = String(req.body.title).trim();
-
-      if (!title) {
-        throw createHttpError("Invoice name is required", 400);
+        totalPages: Math.max(Math.ceil(total / limit), 1)
       }
-
-      lotteryPlay.title = title;
-    }
-
-    if (customerId) {
-      lotteryPlay.customerId = customerId;
-    }
-
-    if (req.body.playDate !== undefined) {
-      lotteryPlay.playDate = normalizeRequiredDate(
-        req.body.playDate,
-        "Invoice date",
-      );
-    }
-
-    if (req.body.rows !== undefined) {
-      lotteryPlay.rows = normalizeRows(req.body.rows);
-    }
-
-    if (twoDigitRate !== null) {
-      lotteryPlay.twoDigitRate = twoDigitRate;
-    }
-
-    if (threeDigitRate !== null) {
-      lotteryPlay.threeDigitRate = threeDigitRate;
-    }
-
-    const status = parseBooleanValue(req.body.status);
-
-    if (status !== undefined) {
-      lotteryPlay.status = status;
-    }
-
-    /*
-     * Editing the invoice resets its checked status.
-     */
-    lotteryPlay.checkedStatus = false;
-
-    lotteryPlay.updatedBy = getActorName(req);
-
-    await lotteryPlay.save();
-
-    const populatedPlay = await populateLotteryPlay(
-      LotteryPlay.findById(lotteryPlay._id),
-    ).lean();
-
-    return res.status(200).json({
-      success: true,
-
-      message: "Invoice updated successfully",
-
-      data: normalizePopulatedPlay(populatedPlay),
-    });
-  } catch (error) {
-    return handleControllerError(error, res, "Could not update invoice");
-  }
-};
-
-/*
-|--------------------------------------------------------------------------
-| PATCH /api/lottery-plays/:id/checked-status
-|--------------------------------------------------------------------------
-*/
-
-const updateLotteryPlayCheckedStatus = async (req, res) => {
-  try {
-    const playId = validateObjectId(req.params.id, "Invoice ID");
-
-    if (typeof req.body.checkedStatus !== "boolean") {
-      throw createHttpError("checkedStatus must be true or false", 400);
-    }
-
-    const updatedLotteryPlay = await populateLotteryPlay(
-      LotteryPlay.findByIdAndUpdate(
-        playId,
-
-        {
-          $set: {
-            checkedStatus: req.body.checkedStatus,
-
-            updatedBy: getActorName(req),
-          },
-        },
-
-        {
-          new: true,
-          runValidators: true,
-        },
-      ),
-    ).lean();
-
-    if (!updatedLotteryPlay) {
-      throw createHttpError("Invoice not found", 404);
-    }
-
-    return res.status(200).json({
-      success: true,
-
-      message: "Invoice checked status updated successfully",
-
-      data: normalizePopulatedPlay(updatedLotteryPlay),
     });
   } catch (error) {
     return handleControllerError(
       error,
       res,
-      "Could not update invoice checked status",
+      'Could not fetch invoices'
     );
   }
 };
 
-/*
-|--------------------------------------------------------------------------
-| DELETE /api/lottery-plays/:id
-|--------------------------------------------------------------------------
-*/
-
-const deleteLotteryPlay = async (req, res) => {
+const getLotteryPlayById = async (req, res) => {
   try {
-    const playId = validateObjectId(req.params.id, "Invoice ID");
-
-    const lotteryPlay = await LotteryPlay.findById(playId);
-
-    if (!lotteryPlay) {
-      throw createHttpError("Invoice not found", 404);
+    if (!isValidObjectId(req.params.id)) {
+      throw createHttpError('Invalid invoice ID', 400);
     }
 
-    await lotteryPlay.deleteOne();
+    const play = await populatePlay(
+      LotteryPlay.findById(req.params.id)
+    );
+
+    if (!play) {
+      throw createHttpError('Invoice not found', 404);
+    }
 
     return res.status(200).json({
       success: true,
-
-      message: "Invoice deleted successfully",
-
-      data: {
-        id: lotteryPlay._id.toString(),
-
-        title: lotteryPlay.title,
-      },
+      data: serializePlay(play)
     });
   } catch (error) {
-    return handleControllerError(error, res, "Could not delete invoice");
+    return handleControllerError(
+      error,
+      res,
+      'Could not fetch invoice'
+    );
   }
 };
 
-/*
-|--------------------------------------------------------------------------
-| Exports
-|--------------------------------------------------------------------------
-*/
+const createLotteryPlay = async (req, res) => {
+  try {
+    const payload = await normalizePlayPayload(req.body);
+
+    const play = await LotteryPlay.create({
+      ...payload,
+      createdBy: req.user?._id || req.user?.id || null,
+      updatedBy: req.user?._id || req.user?.id || null,
+      status: true
+    });
+
+    const populatedPlay = await populatePlay(
+      LotteryPlay.findById(play._id)
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Invoice created successfully',
+      data: serializePlay(populatedPlay)
+    });
+  } catch (error) {
+    return handleControllerError(
+      error,
+      res,
+      'Could not create invoice'
+    );
+  }
+};
+
+const updateLotteryPlay = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      throw createHttpError('Invalid invoice ID', 400);
+    }
+
+    const existingPlay = await LotteryPlay.findById(req.params.id);
+
+    if (!existingPlay) {
+      throw createHttpError('Invoice not found', 404);
+    }
+
+    const payload = await normalizePlayPayload(req.body);
+
+    existingPlay.title = payload.title;
+    existingPlay.productIds = payload.productIds;
+    existingPlay.customerId = payload.customerId;
+    existingPlay.playDate = payload.playDate;
+    existingPlay.twoDigitRate = payload.twoDigitRate;
+    existingPlay.threeDigitRate = payload.threeDigitRate;
+    existingPlay.rows = payload.rows;
+
+    // Remove old invoice-level categories from invoices once they are updated.
+    existingPlay.categoryId = undefined;
+    existingPlay.categoryIds = [];
+
+    existingPlay.updatedBy =
+      req.user?._id || req.user?.id || null;
+
+    await existingPlay.save();
+
+    const populatedPlay = await populatePlay(
+      LotteryPlay.findById(existingPlay._id)
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Invoice updated successfully',
+      data: serializePlay(populatedPlay)
+    });
+  } catch (error) {
+    return handleControllerError(
+      error,
+      res,
+      'Could not update invoice'
+    );
+  }
+};
+
+const deleteLotteryPlay = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      throw createHttpError('Invalid invoice ID', 400);
+    }
+
+    const play = await LotteryPlay.findById(req.params.id);
+
+    if (!play) {
+      throw createHttpError('Invoice not found', 404);
+    }
+
+    await play.deleteOne();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Invoice deleted successfully'
+    });
+  } catch (error) {
+    return handleControllerError(
+      error,
+      res,
+      'Could not delete invoice'
+    );
+  }
+};
 
 export {
   getLotteryPlays,
-  getLotteryPlays as getAllLotteryPlays,
   getLotteryPlayById,
   createLotteryPlay,
   updateLotteryPlay,
-  updateLotteryPlayCheckedStatus,
-  deleteLotteryPlay,
+  deleteLotteryPlay
 };

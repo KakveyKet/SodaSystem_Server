@@ -3,12 +3,15 @@ import express from "express";
 import {
   createCustomer,
   deleteCustomer,
+  depositCustomerBalance,
   getCustomerById,
   getCustomers,
   getMyCustomerProfile,
+  setCustomerBalance,
   updateCustomer,
   updateCustomerBalance,
   updateCustomerStatus,
+  withdrawCustomerBalance,
 } from "../controllers/customer.controller.js";
 
 import {
@@ -20,7 +23,6 @@ const router = express.Router();
 
 router.use(protect);
 
-/* Keep /me before /:id. */
 router.get(
   "/me",
   authorizeRoles("customer"),
@@ -29,8 +31,14 @@ router.get(
 
 router
   .route("/")
-  .get(authorizeRoles("admin"), getCustomers)
-  .post(authorizeRoles("admin"), createCustomer);
+  .get(
+    authorizeRoles("admin"),
+    getCustomers,
+  )
+  .post(
+    authorizeRoles("admin"),
+    createCustomer,
+  );
 
 router.patch(
   "/:id/balance",
@@ -41,31 +49,19 @@ router.patch(
 router.patch(
   "/:id/balance/set",
   authorizeRoles("admin"),
-  (req, _res, next) => {
-    req.body.operation = "set";
-    next();
-  },
-  updateCustomerBalance,
+  setCustomerBalance,
 );
 
 router.patch(
   "/:id/balance/deposit",
   authorizeRoles("admin"),
-  (req, _res, next) => {
-    req.body.operation = "deposit";
-    next();
-  },
-  updateCustomerBalance,
+  depositCustomerBalance,
 );
 
 router.patch(
   "/:id/balance/withdraw",
   authorizeRoles("admin"),
-  (req, _res, next) => {
-    req.body.operation = "withdraw";
-    next();
-  },
-  updateCustomerBalance,
+  withdrawCustomerBalance,
 );
 
 router.patch(
@@ -76,9 +72,21 @@ router.patch(
 
 router
   .route("/:id")
-  .get(authorizeRoles("admin"), getCustomerById)
-  .put(authorizeRoles("admin"), updateCustomer)
-  .patch(authorizeRoles("admin"), updateCustomer)
-  .delete(authorizeRoles("admin"), deleteCustomer);
+  .get(
+    authorizeRoles("admin"),
+    getCustomerById,
+  )
+  .put(
+    authorizeRoles("admin"),
+    updateCustomer,
+  )
+  .patch(
+    authorizeRoles("admin"),
+    updateCustomer,
+  )
+  .delete(
+    authorizeRoles("admin"),
+    deleteCustomer,
+  );
 
 export default router;
