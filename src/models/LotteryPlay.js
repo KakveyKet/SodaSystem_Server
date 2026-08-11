@@ -131,6 +131,55 @@ const lotteryPlaySchema = new Schema(
       default: true
     },
 
+    /*
+    |--------------------------------------------------------------------------
+    | Customer balance integration
+    |--------------------------------------------------------------------------
+    |
+    | totalResult is the same final result shown on the invoice printout.
+    |
+    | Customer balance rule:
+    |   New Balance = Latest Balance + Invoice Total Result
+    |
+    */
+    totalResult: {
+      type: Number,
+      default: 0
+    },
+
+    balanceBefore: {
+      type: Number,
+      default: null
+    },
+
+    balanceAfter: {
+      type: Number,
+      default: null
+    },
+
+    balanceApplied: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+
+    balanceAppliedResult: {
+      type: Number,
+      default: 0
+    },
+
+    balanceAppliedCustomerId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Customer',
+      default: null
+    },
+
+    balanceAppliedAt: {
+      type: Date,
+      default: null
+    },
+
+
     // Legacy invoice-level category fields are kept only so old data remains readable.
     // New create/update logic does not save categories here.
     categoryId: {

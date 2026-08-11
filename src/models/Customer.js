@@ -2,467 +2,174 @@ import mongoose from "mongoose";
 
 const { Schema } = mongoose;
 
-/*
-|--------------------------------------------------------------------------
-| Percentage normalization
-|--------------------------------------------------------------------------
-*/
+const customerSchema = new Schema(
+  {
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      unique: true,
+      sparse: true,
+    },
 
-const normalizePercentageItems = (
-  value,
-) => {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
-    return [];
-  }
+    username: {
+      type: String,
+      required: [true, "Customer username is required"],
+      trim: true,
+      maxlength: [100, "Customer username cannot exceed 100 characters"],
+    },
 
-  let source = value;
-
-  /*
-   * Repair legacy string values when possible.
-   */
-  if (
-    typeof source ===
-    "string"
-  ) {
-    const text =
-      source.trim();
-
-    if (!text) {
-      return [];
-    }
-
-    try {
-      source =
-        JSON.parse(text);
-    } catch {
-      const extracted = [];
-
-      const pattern =
-        /productId\s*:\s*['"]([a-fA-F0-9]{24})['"][\s\S]*?percentage\s*:\s*(-?\d+(?:\.\d+)?)/g;
-
-      let match;
-
-      while (
-        (
-          match =
-            pattern.exec(text)
-        ) !== null
-      ) {
-        extracted.push({
-          productId:
-            match[1],
-
-          percentage:
-            Number(match[2]),
-        });
-      }
-
-      source = extracted;
-    }
-  }
-
-  if (
-    !Array.isArray(source)
-  ) {
-    return [];
-  }
-
-  const normalized = [];
-
-  for (const item of source) {
-    if (
-      !item ||
-      typeof item !==
-        "object" ||
-      Array.isArray(item)
-    ) {
-      continue;
-    }
-
-    const productId =
-      item.productId?._id ||
-      item.productId ||
-      item.product?._id ||
-      item.product ||
-      null;
-
-    const percentage =
-      Number(
-        item.percentage ??
-        item.value ??
-        item.rate,
-      );
-
-    if (
-      !mongoose.isValidObjectId(
-        productId,
-      )
-    ) {
-      continue;
-    }
-
-    if (
-      !Number.isFinite(
-        percentage,
-      ) ||
-      percentage < 0
-    ) {
-      continue;
-    }
-
-    normalized.push({
-      productId,
-      percentage,
-    });
-  }
-
-  return normalized;
-};
-
-/*
-|--------------------------------------------------------------------------
-| Percentage subdocument
-|--------------------------------------------------------------------------
-*/
-
-const customerPercentageSchema =
-  new Schema(
-    {
-      productId: {
-        type:
-          Schema.Types.ObjectId,
-        ref: "Product",
-        required: [
-          true,
-          "Product is required",
-        ],
-      },
-
-      percentage: {
-        type: Number,
-        required: [
-          true,
-          "Percentage is required",
-        ],
-        min: [
-          0,
-          "Percentage cannot be negative",
-        ],
-        validate: {
-          validator(value) {
-            return Number.isFinite(
-              Number(value),
-            );
-          },
-
-          message:
-            "Percentage must be a valid number",
+    email: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: "",
+      maxlength: [254, "Email cannot exceed 254 characters"],
+      validate: {
+        validator(value) {
+          return (
+            value === undefined ||
+            value === null ||
+            value === "" ||
+            /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+          );
         },
+        message: "Please provide a valid email address",
       },
     },
-    {
-      _id: false,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Branch
+    |--------------------------------------------------------------------------
+    |
+    | `branch` is the new relational field.
+    | `branchId` is kept for compatibility with older customer documents/UI.
+    |
+    */
+    branch: {
+      type: Schema.Types.ObjectId,
+      ref: "Branch",
+      default: null,
+      index: true,
     },
-  );
 
-/*
-|--------------------------------------------------------------------------
-| Customer schema
-|--------------------------------------------------------------------------
-*/
+    branchId: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [100, "Branch ID cannot exceed 100 characters"],
+    },
 
-const customerSchema =
-  new Schema(
-    {
-      /*
-      |--------------------------------------------------------------------------
-      | Linked customer login account
-      |--------------------------------------------------------------------------
-      */
+    phoneNumber: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [50, "Phone number cannot exceed 50 characters"],
+    },
 
-      userId: {
-        type:
-          Schema.Types.ObjectId,
-        ref: "User",
-        default: null,
-        unique: true,
-        sparse: true,
-      },
+    address: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [500, "Address cannot exceed 500 characters"],
+    },
 
-      username: {
-        type: String,
-        required: [
-          true,
-          "Customer username is required",
-        ],
-        trim: true,
-        maxlength: [
-          100,
-          "Customer username cannot exceed 100 characters",
-        ],
-      },
+    description: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [1000, "Description cannot exceed 1000 characters"],
+    },
 
-      /*
-      |--------------------------------------------------------------------------
-      | Optional customer email
-      |--------------------------------------------------------------------------
-      */
-
-      email: {
-        type: String,
-        trim: true,
-        lowercase: true,
-        default: undefined,
-        maxlength: [
-          254,
-          "Email cannot exceed 254 characters",
-        ],
-        validate: {
-          validator(value) {
-            if (
-              value === undefined ||
-              value === null ||
-              value === ""
-            ) {
-              return true;
-            }
-
-            return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-              value,
-            );
-          },
-
-          message:
-            "Please provide a valid email address",
+    percentages: {
+      type: [Number],
+      default: [],
+      validate: {
+        validator(values) {
+          return (
+            Array.isArray(values) &&
+            values.every(
+              (value) => Number.isFinite(Number(value)) && Number(value) >= 0,
+            )
+          );
         },
+        message: "Percentages must contain valid non-negative numbers",
       },
+    },
 
-      branchId: {
-        type: String,
-        trim: true,
-        default: "",
-        maxlength: [
-          100,
-          "Branch ID cannot exceed 100 characters",
-        ],
-      },
-
-      phoneNumber: {
-        type: String,
-        trim: true,
-        default: "",
-        maxlength: [
-          50,
-          "Phone number cannot exceed 50 characters",
-        ],
-      },
-
-      address: {
-        type: String,
-        trim: true,
-        default: "",
-        maxlength: [
-          500,
-          "Address cannot exceed 500 characters",
-        ],
-      },
-
-      description: {
-        type: String,
-        trim: true,
-        default: "",
-        maxlength: [
-          1000,
-          "Description cannot exceed 1000 characters",
-        ],
-      },
-
-      percentages: {
-        type: [
-          customerPercentageSchema,
-        ],
-        default: [],
-        set:
-          normalizePercentageItems,
-      },
-
-      balance: {
-        type: Number,
-        default: 0,
-        min: [
-          0,
-          "Customer balance cannot be negative",
-        ],
-        validate: {
-          validator(value) {
-            return (
-              Number.isFinite(
-                Number(value),
-              ) &&
-              Number(value) >= 0
-            );
-          },
-
-          message:
-            "Customer balance must be a valid non-negative number",
+    // Balance is signed because invoice results can move it below zero.
+    // Example: 1000 + (-6000) = -5000.
+    balance: {
+      type: Number,
+      default: 0,
+      validate: {
+        validator(value) {
+          return Number.isFinite(Number(value));
         },
-      },
-
-      status: {
-        type: Boolean,
-        default: true,
-      },
-
-      createdBy: {
-        type: String,
-        trim: true,
-        default: "System",
-      },
-
-      updatedBy: {
-        type: String,
-        trim: true,
-        default: "System",
+        message: "Customer balance must be a valid number",
       },
     },
-    {
-      timestamps: true,
-      versionKey: false,
+
+    status: {
+      type: Boolean,
+      default: true,
     },
-  );
 
-/*
-|--------------------------------------------------------------------------
-| Repair old percentage data when loading
-|--------------------------------------------------------------------------
-*/
+    createdBy: {
+      type: String,
+      trim: true,
+      default: "System",
+    },
 
-customerSchema.pre(
-  "init",
-  function repairLegacyCustomer(
-    rawDocument,
-  ) {
-    if (
-      rawDocument &&
-      rawDocument.percentages !==
-        undefined
-    ) {
-      rawDocument.percentages =
-        normalizePercentageItems(
-          rawDocument.percentages,
-        );
-    }
+    updatedBy: {
+      type: String,
+      trim: true,
+      default: "System",
+    },
+  },
+  {
+    timestamps: true,
+    versionKey: false,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
   },
 );
 
-/*
-|--------------------------------------------------------------------------
-| Normalize customer fields
-|--------------------------------------------------------------------------
-*/
+customerSchema.pre("validate", function normalizeCustomerFields() {
+  const fields = [
+    "username",
+    "email",
+    "branchId",
+    "phoneNumber",
+    "address",
+    "description",
+    "createdBy",
+    "updatedBy",
+  ];
 
-customerSchema.pre(
-  "validate",
-  function normalizeCustomer() {
-    if (
-      typeof this.username ===
-      "string"
-    ) {
-      this.username =
-        this.username
-          .replace(/\s+/g, " ")
-          .trim();
+  for (const field of fields) {
+    if (typeof this[field] === "string") {
+      this[field] = this[field].trim();
     }
+  }
 
-    if (
-      this.email === undefined ||
-      this.email === null
-    ) {
-      this.email = undefined;
-    } else if (
-      typeof this.email ===
-      "string"
-    ) {
-      const normalizedEmail =
-        this.email
-          .trim()
-          .toLowerCase();
+  if (typeof this.email === "string") {
+    this.email = this.email.toLowerCase();
+  }
 
-      this.email =
-        normalizedEmail ||
-        undefined;
-    }
+  this.balance = Number(this.balance || 0);
 
-    const textFields = [
-      "branchId",
-      "phoneNumber",
-      "address",
-      "description",
-      "createdBy",
-      "updatedBy",
-    ];
-
-    for (
-      const fieldName of
-      textFields
-    ) {
-      if (
-        typeof this[
-          fieldName
-        ] === "string"
-      ) {
-        this[fieldName] =
-          this[fieldName].trim();
-      }
-    }
-
-    if (
-      this.balance !== null &&
-      this.balance !== undefined
-    ) {
-      this.balance =
-        Number(this.balance);
-    }
-
-    this.percentages =
-      normalizePercentageItems(
-        this.percentages,
-      );
-  },
-);
-
-/*
-|--------------------------------------------------------------------------
-| Indexes
-|--------------------------------------------------------------------------
-*/
-
-customerSchema.index({
-  username: 1,
+  if (Array.isArray(this.percentages)) {
+    this.percentages = this.percentages.map(Number);
+  }
 });
 
-customerSchema.index({
-  email: 1,
-});
-
-customerSchema.index({
-  status: 1,
-  createdAt: -1,
-});
+customerSchema.index({ username: 1 });
+customerSchema.index({ email: 1 });
+customerSchema.index({ status: 1, createdAt: -1 });
 
 const Customer =
-  mongoose.models.Customer ||
-  mongoose.model(
-    "Customer",
-    customerSchema,
-  );
-
-export {
-  normalizePercentageItems,
-};
+  mongoose.models.Customer || mongoose.model("Customer", customerSchema);
 
 export default Customer;

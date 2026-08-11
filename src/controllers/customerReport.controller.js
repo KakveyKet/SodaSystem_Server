@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
 import CustomerTransaction from "../models/CustomerTransaction.js";
+import Customer from "../models/Customer.js";
 
 const MAX_PAGE_LIMIT = 500;
 
@@ -118,49 +119,103 @@ const getCurrentWeekDateStrings = () => {
   };
 };
 
-const getCustomerDepositReport = async (req, res) => {
+const getSignedAmount = (transaction) => {
+  if (
+    transaction.balanceDelta !== null &&
+    transaction.balanceDelta !== undefined &&
+    Number.isFinite(Number(transaction.balanceDelta))
+  ) {
+    return Number(transaction.balanceDelta);
+  }
+
+  const amount = Number(transaction.amount || 0);
+
+  if (transaction.operation === "withdraw") {
+    return -Math.abs(amount);
+  }
+
+  return Math.abs(amount);
+};
+
+const serializeTransaction = (transaction) => {
+  const data =
+    typeof transaction?.toObject === "function"
+      ? transaction.toObject()
+      : { ...transaction };
+
+  return {
+    ...data,
+    signedAmount: getSignedAmount(data),
+  };
+};
+
+const buildBaseFilter = (req, forcedCustomerId = null) => {
+  const currentWeek = getCurrentWeekDateStrings();
+
+  const dateFromString = req.query.dateFrom || currentWeek.dateFrom;
+  const dateToString = req.query.dateTo || currentWeek.dateTo;
+
+  const dateFrom = reportLocalDateToUtc(dateFromString, false);
+  const dateTo = reportLocalDateToUtc(dateToString, true);
+
+  if (dateFrom > dateTo) {
+    throw createHttpError(
+      "Start date cannot be later than end date",
+      400,
+    );
+  }
+
+  const filter = {
+    transactionDate: {
+      $gte: dateFrom,
+      $lte: dateTo,
+    },
+  };
+
+  if (forcedCustomerId) {
+    filter.customerId = forcedCustomerId;
+  } else if (req.query.customerId) {
+    if (!mongoose.isValidObjectId(req.query.customerId)) {
+      throw createHttpError("Customer ID is invalid", 400);
+    }
+
+    filter.customerId = req.query.customerId;
+  }
+
+  return {
+    filter,
+    dateFromString,
+    dateToString,
+  };
+};
+
+const runReport = async (req, res, operationFilter = null, forcedCustomerId = null) => {
   try {
     const page = parsePositiveInteger(req.query.page, 1);
-
     const limit = Math.min(
       parsePositiveInteger(req.query.limit, 20),
       MAX_PAGE_LIMIT,
     );
-
     const skip = (page - 1) * limit;
 
-    const currentWeek = getCurrentWeekDateStrings();
+    const {
+      filter,
+      dateFromString,
+      dateToString,
+    } = buildBaseFilter(req, forcedCustomerId);
 
-    const dateFromString =
-      req.query.dateFrom || currentWeek.dateFrom;
-
-    const dateToString =
-      req.query.dateTo || currentWeek.dateTo;
-
-    const dateFrom = reportLocalDateToUtc(dateFromString, false);
-    const dateTo = reportLocalDateToUtc(dateToString, true);
-
-    if (dateFrom > dateTo) {
-      throw createHttpError(
-        "Start date cannot be later than end date",
-        400,
-      );
+    if (operationFilter) {
+      filter.operation = operationFilter;
     }
 
-    const filter = {
-      operation: "deposit",
-      transactionDate: {
-        $gte: dateFrom,
-        $lte: dateTo,
-      },
-    };
+    if (req.query.operation) {
+      const operation = String(req.query.operation).trim().toLowerCase();
 
-    if (req.query.customerId) {
-      if (!mongoose.isValidObjectId(req.query.customerId)) {
-        throw createHttpError("Customer ID is invalid", 400);
+      if (!["deposit", "withdraw", "invoice"].includes(operation)) {
+        throw createHttpError("Invalid transaction operation", 400);
       }
 
-      filter.customerId = req.query.customerId;
+      filter.operation = operation;
     }
 
     const [transactions, total] = await Promise.all([
@@ -173,6 +228,10 @@ const getCustomerDepositReport = async (req, res) => {
             path: "userId",
             select: "name username email role status",
           },
+        })
+        .populate({
+          path: "invoiceId",
+          select: "title totalResult playDate balanceApplied",
         })
         .sort({
           transactionDate: -1,
@@ -188,7 +247,7 @@ const getCustomerDepositReport = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: transactions,
+      data: transactions.map(serializeTransaction),
       pagination: {
         page,
         limit,
@@ -196,7 +255,8 @@ const getCustomerDepositReport = async (req, res) => {
         totalPages: Math.max(Math.ceil(total / limit), 1),
       },
       filters: {
-        customerId: req.query.customerId || null,
+        customerId: forcedCustomerId || req.query.customerId || null,
+        operation: filter.operation || null,
         dateFrom: dateFromString,
         dateTo: dateToString,
       },
@@ -205,11 +265,62 @@ const getCustomerDepositReport = async (req, res) => {
     return sendError(
       error,
       res,
-      "Could not load customer deposit report",
+      "Could not load customer transaction report",
     );
   }
 };
 
+const getLinkedCustomerIdForUser = async (req) => {
+  const userId = req.user?._id || req.user?.id;
+
+  if (!userId || !mongoose.isValidObjectId(userId)) {
+    throw createHttpError("Customer login is invalid", 401);
+  }
+
+  const customer = await Customer.findOne({ userId })
+    .select("_id status")
+    .lean();
+
+  if (!customer) {
+    throw createHttpError(
+      "Customer profile is not linked to this account",
+      404,
+    );
+  }
+
+  if (customer.status === false) {
+    throw createHttpError("Customer account is inactive", 403);
+  }
+
+  return customer._id;
+};
+
+// Logged-in customer: own deposits, withdrawals and invoice balance movements.
+const getMyCustomerTransactionReport = async (req, res) => {
+  try {
+    const customerId = await getLinkedCustomerIdForUser(req);
+    return runReport(req, res, null, customerId);
+  } catch (error) {
+    return sendError(
+      error,
+      res,
+      "Could not load your transaction report",
+    );
+  }
+};
+
+// Full balance report: deposits + withdrawals + invoice results.
+const getCustomerTransactionReport = async (req, res) => {
+  return runReport(req, res, null);
+};
+
+// Compatibility endpoint for old deposit-only report integrations.
+const getCustomerDepositReport = async (req, res) => {
+  return runReport(req, res, "deposit");
+};
+
 export {
+  getCustomerTransactionReport,
+  getMyCustomerTransactionReport,
   getCustomerDepositReport,
 };

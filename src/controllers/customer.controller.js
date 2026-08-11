@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 
+import Branch from "../models/Branch.js";
 import Customer from "../models/Customer.js";
 import CustomerTransaction from "../models/CustomerTransaction.js";
 import User from "../models/User.js";
@@ -186,10 +187,6 @@ const normalizeBalance = (value) => {
     throw createHttpError("Customer balance must be a valid number", 400);
   }
 
-  if (balance < 0) {
-    throw createHttpError("Customer balance cannot be negative", 400);
-  }
-
   return balance;
 };
 
@@ -227,10 +224,113 @@ const normalizePercentages = (value) => {
 };
 
 const populateCustomer = (query) =>
-  query.populate({
-    path: "userId",
-    select: "name username email role status lastLoginAt createdAt updatedAt",
-  });
+  query.populate([
+    {
+      path: "userId",
+      select:
+        "name username email role status lastLoginAt createdAt updatedAt",
+    },
+
+    {
+      path: "branch",
+      select:
+        "name code phoneNumber address description status",
+    },
+  ]);
+
+/*
+|--------------------------------------------------------------------------
+| Branch resolver
+|--------------------------------------------------------------------------
+|
+| New UI should send:
+|
+|   branch: "<Branch ObjectId>"
+|
+| or:
+|
+|   branchId: "<Branch ObjectId>"
+|
+| For compatibility, an old branch code/string is still preserved in
+| customer.branchId when no matching Branch document is found.
+|
+*/
+
+const resolveCustomerBranch = async (
+  value,
+) => {
+  if (
+    value === undefined
+  ) {
+    return {
+      touched: false,
+    };
+  }
+
+  const raw =
+    String(
+      value ?? "",
+    ).trim();
+
+  if (!raw) {
+    return {
+      touched: true,
+      branch: null,
+      branchId: "",
+    };
+  }
+
+  if (
+    mongoose.isValidObjectId(
+      raw,
+    )
+  ) {
+    const branch =
+      await Branch.findById(
+        raw,
+      ).lean();
+
+    if (!branch) {
+      throw createHttpError(
+        "Selected branch was not found",
+        400,
+      );
+    }
+
+    return {
+      touched: true,
+      branch: branch._id,
+      branchId: branch.code,
+    };
+  }
+
+  const branch =
+    await Branch.findOne({
+      code: raw.toUpperCase(),
+    }).lean();
+
+  if (branch) {
+    return {
+      touched: true,
+      branch: branch._id,
+      branchId: branch.code,
+    };
+  }
+
+  /*
+   * Legacy compatibility:
+   * keep the old string instead of breaking existing customer forms/data.
+   */
+  return {
+    touched: true,
+    branch: null,
+    branchId: normalizeText(
+      raw,
+      "Branch ID",
+      100,
+    ),
+  };
+};
 
 const ensureUserIdentityAvailable = async (
   username,
@@ -339,6 +439,7 @@ const writeBalanceTransaction = async ({
     source,
     requestedOperation,
     amount,
+    balanceDelta: newValue - oldValue,
     oldBalance: oldValue,
     newBalance: newValue,
     transactionDate,
@@ -435,9 +536,11 @@ const getMyCustomerProfile = async (req, res) => {
       );
     }
 
-    const customer = await Customer.findOne({
-      userId: req.user._id,
-    }).lean();
+    const customer = await populateCustomer(
+      Customer.findOne({
+        userId: req.user._id,
+      }),
+    ).lean();
 
     if (!customer) {
       throw createHttpError(
@@ -950,16 +1053,6 @@ const updateCustomerBalance = async (req, res) => {
         normalizeAmount(
           req.body.amount,
         );
-
-      if (
-        amount >
-        oldBalance
-      ) {
-        throw createHttpError(
-          "Withdrawal amount cannot exceed the customer balance",
-          400,
-        );
-      }
 
       newBalance =
         oldBalance -

@@ -11,10 +11,12 @@ const customerTransactionSchema = new Schema(
       index: true,
     },
 
+    // deposit/withdraw = manual customer balance movement
+    // invoice = invoice result / invoice adjustment / invoice reversal
     operation: {
       type: String,
-      enum: ["deposit", "withdraw"],
-      required: [true, "Transaction operation is required"],
+      enum: ["deposit", "withdraw", "invoice"],
+      required: true,
       index: true,
     },
 
@@ -27,6 +29,12 @@ const customerTransactionSchema = new Schema(
         "balance_deposit",
         "balance_withdraw",
         "opening_balance_backfill",
+        "invoice_create",
+        "invoice_update",
+        "invoice_update_apply",
+        "invoice_customer_change_reverse",
+        "invoice_customer_change_apply",
+        "invoice_delete_reversal",
       ],
       required: true,
       index: true,
@@ -34,26 +42,47 @@ const customerTransactionSchema = new Schema(
 
     requestedOperation: {
       type: String,
-      enum: ["create", "update", "set", "deposit", "withdraw", "backfill"],
-      required: true,
+      default: "",
+      trim: true,
     },
 
+    // Always positive magnitude for compatibility with old deposit rows.
     amount: {
       type: Number,
-      required: [true, "Transaction amount is required"],
-      min: [0, "Transaction amount cannot be negative"],
+      required: true,
+      min: 0,
     },
 
+    // Signed change applied to Customer.balance.
+    // +5000 adds 5000, -6000 subtracts 6000.
+    balanceDelta: {
+      type: Number,
+      default: null,
+    },
+
+    // These must support negative balances.
     oldBalance: {
       type: Number,
       required: true,
-      min: [0, "Old balance cannot be negative"],
     },
 
     newBalance: {
       type: Number,
       required: true,
-      min: [0, "New balance cannot be negative"],
+    },
+
+    invoiceId: {
+      type: Schema.Types.ObjectId,
+      ref: "LotteryPlay",
+      default: null,
+      index: true,
+    },
+
+    invoiceTitle: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: 200,
     },
 
     transactionDate: {
@@ -67,14 +96,14 @@ const customerTransactionSchema = new Schema(
       type: String,
       trim: true,
       default: "",
-      maxlength: [500, "Description cannot exceed 500 characters"],
+      maxlength: 500,
     },
 
     createdBy: {
       type: String,
       trim: true,
       default: "System",
-      maxlength: [150, "Created by cannot exceed 150 characters"],
+      maxlength: 150,
     },
 
     createdByUserId: {
@@ -89,13 +118,9 @@ const customerTransactionSchema = new Schema(
   },
 );
 
-customerTransactionSchema.index({ operation: 1, transactionDate: -1 });
 customerTransactionSchema.index({ customerId: 1, transactionDate: -1 });
-customerTransactionSchema.index({
-  customerId: 1,
-  operation: 1,
-  transactionDate: -1,
-});
+customerTransactionSchema.index({ operation: 1, transactionDate: -1 });
+customerTransactionSchema.index({ invoiceId: 1, createdAt: -1 });
 
 const CustomerTransaction =
   mongoose.models.CustomerTransaction ||

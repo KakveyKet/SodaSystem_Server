@@ -4,6 +4,7 @@ import LotteryPlay from '../models/LotteryPlay.js';
 import Category from '../models/Category.js';
 import Product from '../models/Product.js';
 import Customer from '../models/Customer.js';
+import CustomerTransaction from '../models/CustomerTransaction.js';
 
 const TWO_DIGIT_WIN_MULTIPLIER = 100;
 const THREE_DIGIT_WIN_MULTIPLIER = 600;
@@ -419,15 +420,192 @@ const calculateCategoryGroups = (play) => {
   }));
 };
 
+
+const calculateInvoiceTotalResult = (play) => {
+  const groups = calculateCategoryGroups(play);
+
+  return groups.reduce((total, group) => {
+    return total + Number(group?.calculation?.grandTotal || 0);
+  }, 0);
+};
+
+const getActorName = (req) => {
+  return String(
+    req.user?.username ||
+      req.user?.name ||
+      req.user?.email ||
+      'System'
+  ).trim();
+};
+
+const getActorUserId = (req) => {
+  const value = req.user?._id || req.user?.id || null;
+  return value && isValidObjectId(value) ? value : null;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Apply invoice result to the latest customer balance
+|--------------------------------------------------------------------------
+|
+| Required rule:
+|
+| New Customer Balance = Latest Customer Balance + Invoice Total Result
+|
+| Examples:
+| 1000 + 5000 = 6000
+| 1000 + (-6000) = -5000
+|
+| $inc is used so the operation always starts from the latest balance in DB.
+|
+*/
+const applyInvoiceBalanceDelta = async ({
+  req,
+  customerId,
+  delta,
+  invoiceId,
+  invoiceTitle,
+  source,
+  description,
+  transactionDate = new Date()
+}) => {
+  const signedDelta = Number(delta || 0);
+
+  if (!Number.isFinite(signedDelta)) {
+    throw createHttpError('Invoice balance change is invalid', 500);
+  }
+
+  const customer = await Customer.findOneAndUpdate(
+    {
+      _id: customerId,
+      status: { $ne: false }
+    },
+    {
+      $inc: {
+        balance: signedDelta
+      },
+      $set: {
+        updatedBy: getActorName(req)
+      }
+    },
+    {
+      new: true,
+      runValidators: true
+    }
+  );
+
+  if (!customer) {
+    throw createHttpError('Customer not found or inactive', 404);
+  }
+
+  const newBalance = Number(customer.balance || 0);
+  const oldBalance = newBalance - signedDelta;
+
+  if (signedDelta === 0) {
+    return {
+      customer,
+      oldBalance,
+      newBalance,
+      transaction: null,
+      delta: 0
+    };
+  }
+
+  let transaction = null;
+
+  try {
+    transaction = await CustomerTransaction.create({
+      customerId: customer._id,
+      operation: 'invoice',
+      source,
+      requestedOperation: source,
+      amount: Math.abs(signedDelta),
+      balanceDelta: signedDelta,
+      oldBalance,
+      newBalance,
+      invoiceId,
+      invoiceTitle: normalizeString(invoiceTitle),
+      transactionDate,
+      description:
+        normalizeString(description) ||
+        `Invoice ${normalizeString(invoiceTitle)} result`,
+      createdBy: getActorName(req),
+      createdByUserId: getActorUserId(req)
+    });
+  } catch (error) {
+    // Do not leave the customer balance changed without its ledger entry.
+    await Customer.findByIdAndUpdate(customer._id, {
+      $inc: {
+        balance: -signedDelta
+      },
+      $set: {
+        updatedBy: getActorName(req)
+      }
+    }).catch((rollbackError) => {
+      console.error('Invoice customer balance rollback failed:', rollbackError);
+    });
+
+    throw error;
+  }
+
+  return {
+    customer,
+    oldBalance,
+    newBalance,
+    transaction,
+    delta: signedDelta
+  };
+};
+
+const rollbackInvoiceBalanceChange = async (change, req) => {
+  if (!change || !Number(change.delta || 0)) {
+    return;
+  }
+
+  const customerId = change.customer?._id;
+
+  if (customerId) {
+    await Customer.findByIdAndUpdate(customerId, {
+      $inc: {
+        balance: -Number(change.delta)
+      },
+      $set: {
+        updatedBy: getActorName(req)
+      }
+    }).catch((error) => {
+      console.error('Invoice balance rollback failed:', error);
+    });
+  }
+
+  if (change.transaction?._id) {
+    await CustomerTransaction.findByIdAndDelete(
+      change.transaction._id
+    ).catch((error) => {
+      console.error('Invoice transaction rollback failed:', error);
+    });
+  }
+};
+
 const serializePlay = (play) => {
   const data =
     typeof play?.toObject === 'function'
       ? play.toObject()
       : { ...play };
 
+  const categoryGroups = calculateCategoryGroups(data);
+  const calculatedTotalResult = categoryGroups.reduce(
+    (total, group) => total + Number(group?.calculation?.grandTotal || 0),
+    0
+  );
+
   return {
     ...data,
-    categoryGroups: calculateCategoryGroups(data)
+    categoryGroups,
+    calculatedTotalResult,
+    totalResult:
+      data.totalResult === null || data.totalResult === undefined
+        ? calculatedTotalResult
+        : Number(data.totalResult)
   };
 };
 
@@ -574,6 +752,33 @@ const populatePlay = (query) => {
     });
 };
 
+const getLinkedCustomerForUser = async (req) => {
+  const userId = req.user?._id || req.user?.id;
+
+  if (!userId || !isValidObjectId(userId)) {
+    throw createHttpError('Customer login is invalid', 401);
+  }
+
+  const customer = await Customer.findOne({
+    userId,
+  })
+    .select('_id status')
+    .lean();
+
+  if (!customer) {
+    throw createHttpError(
+      'Customer profile is not linked to this account',
+      404
+    );
+  }
+
+  if (customer.status === false) {
+    throw createHttpError('Customer account is inactive', 403);
+  }
+
+  return customer;
+};
+
 const getLotteryPlays = async (req, res) => {
   try {
     const page = Math.max(Number(req.query.page || 1), 1);
@@ -640,16 +845,135 @@ const getLotteryPlayById = async (req, res) => {
   }
 };
 
+const getMyLotteryPlays = async (req, res) => {
+  try {
+    const customer = await getLinkedCustomerForUser(req);
+
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(
+      Math.max(Number(req.query.limit || 10), 1),
+      100
+    );
+    const skip = (page - 1) * limit;
+
+    const filter = buildListFilter(req);
+
+    // Security: always force the logged-in customer's own ID.
+    filter.customerId = customer._id;
+
+    const [plays, total] = await Promise.all([
+      populatePlay(
+        LotteryPlay.find(filter)
+          .sort({ playDate: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+      ),
+      LotteryPlay.countDocuments(filter)
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: plays.map(serializePlay),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(Math.ceil(total / limit), 1)
+      }
+    });
+  } catch (error) {
+    return handleControllerError(
+      error,
+      res,
+      'Could not fetch customer invoices'
+    );
+  }
+};
+
+const getMyLotteryPlayById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      throw createHttpError('Invalid invoice ID', 400);
+    }
+
+    const customer = await getLinkedCustomerForUser(req);
+
+    const play = await populatePlay(
+      LotteryPlay.findOne({
+        _id: req.params.id,
+        customerId: customer._id
+      })
+    );
+
+    if (!play) {
+      throw createHttpError('Invoice not found', 404);
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: serializePlay(play)
+    });
+  } catch (error) {
+    return handleControllerError(
+      error,
+      res,
+      'Could not fetch customer invoice'
+    );
+  }
+};
+
 const createLotteryPlay = async (req, res) => {
+  let play = null;
+  let balanceChange = null;
+
   try {
     const payload = await normalizePlayPayload(req.body);
 
-    const play = await LotteryPlay.create({
+    const totalResult = calculateInvoiceTotalResult({
       ...payload,
+      categoryId: null,
+      categoryIds: []
+    });
+
+    play = await LotteryPlay.create({
+      ...payload,
+      totalResult,
+      balanceApplied: false,
+      balanceAppliedResult: 0,
+      balanceAppliedCustomerId: null,
+      balanceAppliedAt: null,
       createdBy: req.user?._id || req.user?.id || null,
       updatedBy: req.user?._id || req.user?.id || null,
       status: true
     });
+
+    balanceChange = await applyInvoiceBalanceDelta({
+      req,
+      customerId: payload.customerId,
+      delta: totalResult,
+      invoiceId: play._id,
+      invoiceTitle: play.title,
+      source: 'invoice_create',
+      description: `Invoice created: ${play.title}`,
+      transactionDate: play.playDate || new Date()
+    });
+
+    try {
+      play.totalResult = totalResult;
+      play.balanceBefore = balanceChange.oldBalance;
+      play.balanceAfter = balanceChange.newBalance;
+      play.balanceApplied = true;
+      play.balanceAppliedResult = totalResult;
+      play.balanceAppliedCustomerId = payload.customerId;
+      play.balanceAppliedAt = new Date();
+
+      await play.save();
+    } catch (error) {
+      await rollbackInvoiceBalanceChange(balanceChange, req);
+      balanceChange = null;
+      await LotteryPlay.findByIdAndDelete(play._id).catch(() => {});
+      throw error;
+    }
 
     const populatedPlay = await populatePlay(
       LotteryPlay.findById(play._id)
@@ -657,10 +981,19 @@ const createLotteryPlay = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Invoice created successfully',
-      data: serializePlay(populatedPlay)
+      message: 'Invoice created and customer balance updated successfully',
+      data: serializePlay(populatedPlay),
+      balance: {
+        before: balanceChange.oldBalance,
+        invoiceResult: totalResult,
+        after: balanceChange.newBalance
+      }
     });
   } catch (error) {
+    if (play?._id && !play.balanceApplied) {
+      await LotteryPlay.findByIdAndDelete(play._id).catch(() => {});
+    }
+
     return handleControllerError(
       error,
       res,
@@ -670,6 +1003,9 @@ const createLotteryPlay = async (req, res) => {
 };
 
 const updateLotteryPlay = async (req, res) => {
+  const appliedChanges = [];
+  let updateCommitted = false;
+
   try {
     if (!isValidObjectId(req.params.id)) {
       throw createHttpError('Invalid invoice ID', 400);
@@ -683,6 +1019,87 @@ const updateLotteryPlay = async (req, res) => {
 
     const payload = await normalizePlayPayload(req.body);
 
+    const newTotalResult = calculateInvoiceTotalResult({
+      ...payload,
+      categoryId: null,
+      categoryIds: []
+    });
+
+    const oldWasApplied = Boolean(existingPlay.balanceApplied);
+    const oldAppliedResult = oldWasApplied
+      ? Number(
+          existingPlay.balanceAppliedResult ??
+            existingPlay.totalResult ??
+            0
+        )
+      : 0;
+
+    const oldAppliedCustomerId = oldWasApplied
+      ? String(
+          existingPlay.balanceAppliedCustomerId ||
+            existingPlay.customerId
+        )
+      : null;
+
+    const newCustomerId = String(payload.customerId);
+
+    let finalBalanceChange = null;
+
+    if (oldWasApplied && oldAppliedCustomerId === newCustomerId) {
+      // Same customer: apply only the difference.
+      const difference = newTotalResult - oldAppliedResult;
+
+      finalBalanceChange = await applyInvoiceBalanceDelta({
+        req,
+        customerId: newCustomerId,
+        delta: difference,
+        invoiceId: existingPlay._id,
+        invoiceTitle: payload.title,
+        source: 'invoice_update',
+        description:
+          `Invoice updated: ${payload.title}. ` +
+          `Result changed from ${oldAppliedResult} to ${newTotalResult}`,
+        transactionDate: payload.playDate
+      });
+
+      appliedChanges.push(finalBalanceChange);
+    } else {
+      // Customer changed: remove the old applied result from the old customer.
+      if (oldWasApplied && oldAppliedCustomerId) {
+        const reverseOld = await applyInvoiceBalanceDelta({
+          req,
+          customerId: oldAppliedCustomerId,
+          delta: -oldAppliedResult,
+          invoiceId: existingPlay._id,
+          invoiceTitle: existingPlay.title,
+          source: 'invoice_customer_change_reverse',
+          description:
+            `Invoice moved to another customer: reverse ${existingPlay.title}`,
+          transactionDate: payload.playDate
+        });
+
+        appliedChanges.push(reverseOld);
+      }
+
+      // Apply the complete new invoice result to the new customer.
+      finalBalanceChange = await applyInvoiceBalanceDelta({
+        req,
+        customerId: newCustomerId,
+        delta: newTotalResult,
+        invoiceId: existingPlay._id,
+        invoiceTitle: payload.title,
+        source: oldWasApplied
+          ? 'invoice_customer_change_apply'
+          : 'invoice_update_apply',
+        description: oldWasApplied
+          ? `Invoice moved to this customer: ${payload.title}`
+          : `Invoice balance applied on update: ${payload.title}`,
+        transactionDate: payload.playDate
+      });
+
+      appliedChanges.push(finalBalanceChange);
+    }
+
     existingPlay.title = payload.title;
     existingPlay.productIds = payload.productIds;
     existingPlay.customerId = payload.customerId;
@@ -691,14 +1108,21 @@ const updateLotteryPlay = async (req, res) => {
     existingPlay.threeDigitRate = payload.threeDigitRate;
     existingPlay.rows = payload.rows;
 
-    // Remove old invoice-level categories from invoices once they are updated.
     existingPlay.categoryId = undefined;
     existingPlay.categoryIds = [];
 
-    existingPlay.updatedBy =
-      req.user?._id || req.user?.id || null;
+    existingPlay.totalResult = newTotalResult;
+    existingPlay.balanceBefore = finalBalanceChange.oldBalance;
+    existingPlay.balanceAfter = finalBalanceChange.newBalance;
+    existingPlay.balanceApplied = true;
+    existingPlay.balanceAppliedResult = newTotalResult;
+    existingPlay.balanceAppliedCustomerId = payload.customerId;
+    existingPlay.balanceAppliedAt = new Date();
+
+    existingPlay.updatedBy = req.user?._id || req.user?.id || null;
 
     await existingPlay.save();
+    updateCommitted = true;
 
     const populatedPlay = await populatePlay(
       LotteryPlay.findById(existingPlay._id)
@@ -706,10 +1130,21 @@ const updateLotteryPlay = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Invoice updated successfully',
-      data: serializePlay(populatedPlay)
+      message: 'Invoice updated and customer balance adjusted successfully',
+      data: serializePlay(populatedPlay),
+      balance: {
+        before: finalBalanceChange.oldBalance,
+        invoiceResult: newTotalResult,
+        after: finalBalanceChange.newBalance
+      }
     });
   } catch (error) {
+    if (!updateCommitted && appliedChanges.length) {
+      for (const change of [...appliedChanges].reverse()) {
+        await rollbackInvoiceBalanceChange(change, req);
+      }
+    }
+
     return handleControllerError(
       error,
       res,
@@ -719,6 +1154,8 @@ const updateLotteryPlay = async (req, res) => {
 };
 
 const deleteLotteryPlay = async (req, res) => {
+  let reversalChange = null;
+
   try {
     if (!isValidObjectId(req.params.id)) {
       throw createHttpError('Invalid invoice ID', 400);
@@ -730,11 +1167,44 @@ const deleteLotteryPlay = async (req, res) => {
       throw createHttpError('Invoice not found', 404);
     }
 
-    await play.deleteOne();
+    if (play.balanceApplied) {
+      const appliedResult = Number(
+        play.balanceAppliedResult ?? play.totalResult ?? 0
+      );
+
+      const appliedCustomerId = String(
+        play.balanceAppliedCustomerId || play.customerId
+      );
+
+      reversalChange = await applyInvoiceBalanceDelta({
+        req,
+        customerId: appliedCustomerId,
+        delta: -appliedResult,
+        invoiceId: play._id,
+        invoiceTitle: play.title,
+        source: 'invoice_delete_reversal',
+        description: `Invoice deleted: reverse ${play.title}`,
+        transactionDate: new Date()
+      });
+    }
+
+    try {
+      await play.deleteOne();
+    } catch (error) {
+      await rollbackInvoiceBalanceChange(reversalChange, req);
+      throw error;
+    }
 
     return res.status(200).json({
       success: true,
-      message: 'Invoice deleted successfully'
+      message: 'Invoice deleted and customer balance reversed successfully',
+      balance: reversalChange
+        ? {
+            before: reversalChange.oldBalance,
+            reversedResult: -Number(reversalChange.delta || 0),
+            after: reversalChange.newBalance
+          }
+        : null
     });
   } catch (error) {
     return handleControllerError(
@@ -747,6 +1217,8 @@ const deleteLotteryPlay = async (req, res) => {
 
 export {
   getLotteryPlays,
+  getMyLotteryPlays,
+  getMyLotteryPlayById,
   getLotteryPlayById,
   createLotteryPlay,
   updateLotteryPlay,

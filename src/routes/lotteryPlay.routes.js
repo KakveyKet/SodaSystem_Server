@@ -3,6 +3,8 @@ import express from 'express';
 import {
   getLotteryPlays,
   getLotteryPlayById,
+  getMyLotteryPlays,
+  getMyLotteryPlayById,
   createLotteryPlay,
   updateLotteryPlay,
   deleteLotteryPlay
@@ -17,8 +19,39 @@ const router = express.Router();
 
 router.use(protect);
 
-router.get('/', getLotteryPlays);
-router.get('/:id', getLotteryPlayById);
+/*
+|--------------------------------------------------------------------------
+| Customer read-only invoice access
+|--------------------------------------------------------------------------
+|
+| Customer ID is resolved from req.user on the backend.
+| The frontend never gets permission to request another customer's invoices.
+|
+*/
+router.get(
+  '/me',
+  authorizeRoles('customer'),
+  getMyLotteryPlays
+);
+
+router.get(
+  '/me/:id',
+  authorizeRoles('customer'),
+  getMyLotteryPlayById
+);
+
+/* Admin / staff invoice access */
+router.get(
+  '/',
+  authorizeRoles('admin', 'user'),
+  getLotteryPlays
+);
+
+router.get(
+  '/:id',
+  authorizeRoles('admin', 'user'),
+  getLotteryPlayById
+);
 
 router.post(
   '/',

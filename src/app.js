@@ -9,6 +9,7 @@ import authRoutes from "./routes/auth.routes.js";
 import userRoutes from "./routes/user.routes.js";
 import productRoutes from "./routes/product.routes.js";
 import categoryRoutes from "./routes/category.routes.js";
+import branchRoutes from "./routes/branch.routes.js";
 import customerRoutes from "./routes/customer.routes.js";
 import lotteryChiefBalanceRoutes from "./routes/lotteryChiefBalance.routes.js";
 import chiefExpenseRoutes from "./routes/chiefExpense.routes.js";
@@ -123,6 +124,11 @@ app.use(
 app.use(
   "/api/categories",
   categoryRoutes,
+);
+
+app.use(
+  "/api/branches",
+  branchRoutes,
 );
 
 app.use(
